@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Registru OCR — procesare documente contabile</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Libre+Franklin:wght@600;700;800&family=Source+Sans+3:wght@400;600&family=Source+Code+Pro:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --navy: #0f2e55;         /* bleumarin institutional */
+    --navy-2: #1d4e8f;       /* actiuni, linkuri */
+    --navy-3: #eaf0f8;       /* fundal tenta */
+    --gold: #b99048;         /* firet de raport anual — folosit cu zgarcenie */
+    --ink: #16233a;
+    --muted: #5a6b80;
+    --line: #d9e2ec;
+    --bg: #f4f7fb;
+    --card: #ffffff;
+    --ok-bg: #e7f3ec;  --ok-fg: #1e6b45;
+    --warn-bg: #fbf3e2; --warn-fg: #8a5d0b;
+    --bad-bg: #faeae9;  --bad-fg: #a02c26;
+    --neutral-bg: #eef1f5; --neutral-fg: #5a6b80;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
+  body {
+    font-family: "Source Sans 3", system-ui, sans-serif;
+    background: var(--bg); color: var(--ink);
+    font-size: 15px; line-height: 1.55;
+  }
+  .mono { font-family: "Source Code Pro", monospace; font-variant-numeric: tabular-nums; }
+
+  /* ---------- antet ---------- */
+  header { background: var(--navy); border-bottom: 3px solid var(--gold); }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+  .head-inner { padding: 22px 0 18px; }
+  h1 {
+    font-family: "Libre Franklin", sans-serif;
+    font-weight: 800; font-size: clamp(20px, 3vw, 26px);
+    letter-spacing: 0.04em; text-transform: uppercase; color: #fff;
+  }
+  .tagline { color: #b9c9de; font-size: 14px; margin-top: 3px; }
+
+  main { max-width: 1080px; margin: 0 auto; padding: 26px 24px 80px; }
+
+  /* ---------- zona de incarcare ---------- */
+  .upload {
+    background: var(--card); border: 1px solid var(--line); border-radius: 4px;
+    padding: 20px; display: grid; gap: 14px;
+  }
+  .dropzone {
+    border: 1px dashed #a9bcd4; border-radius: 4px; background: var(--navy-3);
+    padding: 34px 20px; text-align: center; color: var(--muted); cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  .dropzone.dragover, .dropzone:hover { border-color: var(--navy-2); background: #dfe9f6; }
+  .dropzone strong { color: var(--navy); }
+  .dropzone .filename { color: var(--navy-2); font-weight: 600; margin-top: 6px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+  label[for="docType"] { font-weight: 600; font-size: 14px; }
+  select, button.primary, button.ghost { font-family: inherit; font-size: 14px; border-radius: 3px; }
+  select { border: 1px solid var(--line); background: var(--card); color: var(--ink); padding: 9px 12px; }
+  button.primary {
+    background: var(--navy); color: #fff; border: none; font-weight: 600;
+    cursor: pointer; padding: 10px 26px; letter-spacing: 0.03em; text-transform: uppercase;
+    font-size: 13px;
+  }
+  button.primary:hover { background: var(--navy-2); }
+  button.primary:disabled { background: var(--muted); cursor: wait; }
+  button.ghost {
+    background: none; border: 1px solid var(--navy); color: var(--navy);
+    font-weight: 600; padding: 9px 18px; cursor: pointer;
+  }
+  button.ghost:hover { background: var(--navy); color: #fff; }
+  :focus-visible { outline: 3px solid var(--navy-2); outline-offset: 2px; }
+
+  .status { color: var(--muted); font-size: 14px; min-height: 20px; }
+  .status.error { color: var(--bad-fg); font-weight: 600; }
+
+  /* ---------- banda de sinteza (executive summary) ---------- */
+  .totals {
+    display: none; margin-top: 26px;
+    background: var(--navy); color: #fff; border-radius: 4px;
+    padding: 18px 22px;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px 28px;
+  }
+  .totals.visible { display: grid; }
+  .tot-label {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: #9fb3cd;
+  }
+  .tot-value {
+    font-family: "Source Code Pro", monospace; font-variant-numeric: tabular-nums;
+    font-size: 22px; font-weight: 500; margin-top: 2px;
+  }
+
+  /* ---------- sectiuni ---------- */
+  section { margin-top: 32px; }
+  h2 {
+    font-family: "Libre Franklin", sans-serif;
+    font-weight: 700; font-size: 14px;
+    text-transform: uppercase; letter-spacing: 0.12em; color: var(--navy);
+    border-bottom: 2px solid var(--navy); padding-bottom: 7px; margin-bottom: 16px;
+    display: flex; justify-content: space-between; align-items: baseline;
+  }
+  h2 .count { font-family: "Source Code Pro", monospace; font-weight: 400; color: var(--muted); font-size: 13px; letter-spacing: 0; text-transform: none; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(430px, 1fr)); gap: 16px; }
+  @media (max-width: 520px) { .grid { grid-template-columns: 1fr; } }
+
+  /* ---------- card document ---------- */
+  .doc {
+    background: var(--card); border: 1px solid var(--line); border-radius: 4px;
+    border-top: 3px solid var(--navy);
+    padding: 18px 18px 14px;
+  }
+  .doc.chitanta { border-top-color: var(--gold); }
+  .doc-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 10px; }
+  .doc-title { font-weight: 600; font-size: 16px; font-family: "Libre Franklin", sans-serif; }
+  .doc-sub { color: var(--muted); font-size: 13px; }
+
+  /* statusuri sobre, dreptunghiulare */
+  .badge {
+    font-size: 11px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase;
+    border-radius: 3px; padding: 4px 10px; white-space: nowrap; flex-shrink: 0;
+  }
+  .badge.ok { background: var(--ok-bg); color: var(--ok-fg); }
+  .badge.warn { background: var(--warn-bg); color: var(--warn-fg); }
+  .badge.bad { background: var(--bad-bg); color: var(--bad-fg); }
+  .badge.neutral { background: var(--neutral-bg); color: var(--neutral-fg); }
+
+  .field { display: flex; justify-content: space-between; gap: 14px; padding: 4px 0; font-size: 14px; border-bottom: 1px solid #eef2f7; }
+  .field:last-of-type { border-bottom: none; }
+  .field .k { color: var(--muted); }
+  .field .v { text-align: right; }
+  .amount { font-family: "Source Code Pro", monospace; font-variant-numeric: tabular-nums; }
+  .field.total { background: var(--navy-3); margin: 4px -8px; padding: 6px 8px; border-bottom: none; border-radius: 3px; }
+  .field.total .v { font-family: "Source Code Pro", monospace; font-weight: 600; font-size: 16px; color: var(--navy); }
+
+  .pill {
+    display: inline-block; font-size: 12px; border-radius: 3px;
+    padding: 1px 8px; margin-left: 6px;
+  }
+  .pill.green { background: var(--ok-bg); color: var(--ok-fg); }
+  .pill.amber { background: var(--warn-bg); color: var(--warn-fg); }
+
+  details { margin-top: 10px; }
+  summary { cursor: pointer; font-weight: 600; font-size: 13px; color: var(--navy-2); }
+  summary:hover { text-decoration: underline; }
+  table.mon { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13.5px; }
+  table.mon td { padding: 5px 8px 5px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  table.mon td.formula { font-family: "Source Code Pro", monospace; white-space: nowrap; }
+  table.mon td.sum { font-family: "Source Code Pro", monospace; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  table.mon td.lbl { color: var(--muted); }
+  table.mon tr:last-child td { border-bottom: none; }
+
+  .note { color: var(--muted); font-size: 13px; margin-top: 8px; }
+  ul.warnings {
+    margin: 10px 0 0; padding: 8px 12px 8px 28px;
+    background: var(--warn-bg); border-left: 3px solid var(--warn-fg);
+    border-radius: 3px; font-size: 13.5px;
+  }
+  ul.warnings li { color: var(--warn-fg); }
+  pre.raw {
+    font-family: "Source Code Pro", monospace; font-size: 12px;
+    white-space: pre-wrap; background: var(--bg);
+    border: 1px solid var(--line); border-radius: 3px;
+    padding: 10px; margin-top: 8px; color: var(--muted);
+    max-height: 240px; overflow: auto;
+  }
+
+  .empty {
+    text-align: center; color: var(--muted); padding: 46px 20px;
+    border: 1px dashed var(--line); border-radius: 4px; margin-top: 26px; background: var(--card);
+  }
+  .export-bar { display: none; justify-content: flex-end; margin-top: 26px; }
+  .export-bar.visible { display: flex; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap head-inner">
+    <h1>Registru OCR</h1>
+    <p class="tagline">Procesare bonuri fiscale și chitanțe · verificare ANAF · note contabile · export</p>
+  </div>
+</header>
+
+<main>
+  <!-- incarcare -->
+  <div class="upload">
+    <div class="dropzone" id="dropzone" tabindex="0" role="button"
+         aria-label="Alege sau trage o poză cu documente">
+      <strong>Trage aici poza</strong> cu bonuri sau chitanțe, sau apasă pentru a alege un fișier
+      <div class="filename" id="filename"></div>
+    </div>
+    <input type="file" id="fileInput" accept="image/*,.pdf" hidden>
+    <div class="controls">
+      <label for="docType">Tip document:</label>
+      <select id="docType">
+        <option value="auto" selected>Auto (recomandat)</option>
+        <option value="bon">Bon fiscal</option>
+        <option value="chitanta">Chitanță de mână</option>
+      </select>
+      <button class="primary" id="processBtn" disabled>Procesează</button>
+      <span class="status" id="status"></span>
+    </div>
+  </div>
+
+  <!-- sinteza -->
+  <div class="totals" id="totals">
+    <div><div class="tot-label">Documente</div><div class="tot-value" id="totDocs">0</div></div>
+    <div><div class="tot-label">Total sume</div><div class="tot-value" id="totSum">0,00 lei</div></div>
+    <div><div class="tot-label">TVA pe documente</div><div class="tot-value" id="totVat">0,00 lei</div></div>
+    <div><div class="tot-label">Confirmate ANAF</div><div class="tot-value" id="totAnaf">0 / 0</div></div>
+  </div>
+
+  <!-- rezultate -->
+  <section id="secBonuri" style="display:none">
+    <h2>Bonuri fiscale <span class="count" id="cntBonuri"></span></h2>
+    <div class="grid" id="receipts"></div>
+  </section>
+
+  <section id="secChitante" style="display:none">
+    <h2>Chitanțe <span class="count" id="cntChitante"></span></h2>
+    <div class="grid" id="chitante"></div>
+  </section>
+
+  <div class="export-bar" id="exportBar">
+    <button class="ghost" id="exportBtn">Exportă CSV pentru contabilitate</button>
+  </div>
+
+  <div class="empty" id="emptyState">
+    Încă nu ai procesat nimic. Încarcă o poză — poate conține mai multe documente deodată,
+    inclusiv bonuri și chitanțe amestecate.
+  </div>
+</main>
+
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const dropzone = $("dropzone"), fileInput = $("fileInput"),
+        processBtn = $("processBtn"), statusEl = $("status");
+  let currentFile = null, lastData = null;
+
+  const fmt = new Intl.NumberFormat("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const money = (v) => v == null ? "—" : fmt.format(Number(v)) + " lei";
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+  // ------- alegerea fisierului -------
+  dropzone.addEventListener("click", () => fileInput.click());
+  dropzone.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") fileInput.click(); });
+  fileInput.addEventListener("change", () => setFile(fileInput.files[0]));
+  ["dragover", "dragenter"].forEach(ev => dropzone.addEventListener(ev, (e) => {
+    e.preventDefault(); dropzone.classList.add("dragover");
+  }));
+  ["dragleave", "drop"].forEach(ev => dropzone.addEventListener(ev, (e) => {
+    e.preventDefault(); dropzone.classList.remove("dragover");
+  }));
+  dropzone.addEventListener("drop", (e) => setFile(e.dataTransfer.files[0]));
+
+  function setFile(f) {
+    if (!f) return;
+    currentFile = f;
+    $("filename").textContent = f.name;
+    processBtn.disabled = false;
+    statusEl.textContent = "";
+    statusEl.classList.remove("error");
+  }
+
+  // ------- procesare -------
+  processBtn.addEventListener("click", async () => {
+    if (!currentFile) return;
+    processBtn.disabled = true;
+    processBtn.textContent = "Se procesează…";
+    statusEl.classList.remove("error");
+    statusEl.textContent = "OCR + verificare ANAF în curs";
+    try {
+      const fd = new FormData();
+      fd.append("file", currentFile);
+      fd.append("doc_type", $("docType").value);
+      const res = await fetch("/upload", { method: "POST", body: fd });
+      const data = await res.json();
+      if (!res.ok || data.success === false) {
+        throw new Error(data.message || "Serverul a răspuns cu eroare.");
+      }
+      lastData = data;
+      render(data);
+      statusEl.textContent = data.message || "Gata.";
+    } catch (err) {
+      statusEl.classList.add("error");
+      statusEl.textContent = "Procesarea a eșuat: " + err.message + " Încearcă o poză mai clară sau reia.";
+    } finally {
+      processBtn.disabled = false;
+      processBtn.textContent = "Procesează";
+    }
+  });
+
+  // ------- statusuri -------
+  function badge(status) {
+    const map = {
+      confirmat_anaf: ["Confirmat ANAF", "ok"],
+      confirmat_anaf_reparat: ["Confirmat ANAF · CUI reparat", "ok"],
+      cui_gasit_nume_diferit_verifica_manual: ["Nume diferit — verifică", "bad"],
+      cui_incert_necesita_verificare: ["CUI incert — verifică", "warn"],
+      cui_negasit_anaf: ["Negăsit la ANAF", "bad"],
+      fara_cui: ["Fără CUI", "bad"],
+      neverificat: ["Neverificat", "neutral"],
+    };
+    const [text, cls] = map[status] || map.neverificat;
+    return '<span class="badge ' + cls + '">' + text + "</span>";
+  }
+  const field = (k, v, extra) =>
+    '<div class="field ' + (extra || "") + '"><span class="k">' + k + '</span><span class="v">' + v + "</span></div>";
+
+  // ------- randare -------
+  function render(data) {
+    const receipts = data.receipts || [];
+    const chitante = data.chitante || [];
+    $("emptyState").style.display = (receipts.length + chitante.length) ? "none" : "block";
+
+    let sum = 0, vat = 0, anafOk = 0, anafTotal = 0;
+    const addAnaf = (st) => { anafTotal++; if (st === "confirmat_anaf" || st === "confirmat_anaf_reparat") anafOk++; };
+    receipts.forEach(r => {
+      sum += r.total || 0;
+      (r.vatLines || []).forEach(v => vat += v.amount || 0);
+      addAnaf(r.anaf && r.anaf.status);
+    });
+    chitante.forEach(c => { sum += c.suma || 0; addAnaf(c.emitentAnaf && c.emitentAnaf.status); });
+    $("totDocs").textContent = receipts.length + chitante.length;
+    $("totSum").textContent = money(sum);
+    $("totVat").textContent = money(vat);
+    $("totAnaf").textContent = anafOk + " / " + anafTotal;
+    $("totals").classList.add("visible");
+    $("exportBar").classList.toggle("visible", receipts.length + chitante.length > 0);
+
+    $("secBonuri").style.display = receipts.length ? "block" : "none";
+    $("cntBonuri").textContent = receipts.length ? receipts.length + " detectate" : "";
+    $("receipts").innerHTML = receipts.map(renderReceipt).join("");
+
+    $("secChitante").style.display = chitante.length ? "block" : "none";
+    $("cntChitante").textContent = chitante.length ? chitante.length + " detectate" : "";
+    $("chitante").innerHTML = chitante.map(renderChitanta).join("");
+  }
+
+  function monTable(entries) {
+    if (!entries || !entries.length) return "";
+    return '<details><summary>Notă contabilă propusă</summary><table class="mon">' +
+      entries.map(e =>
+        '<tr><td class="formula">' + esc(e.debit) + " = " + esc(e.credit) +
+        '</td><td class="sum">' + money(e.amount) +
+        '</td><td class="lbl">' + esc(e.label) + "</td></tr>").join("") +
+      "</table></details>";
+  }
+  const warnList = (w) => (w && w.length)
+    ? '<ul class="warnings">' + w.map(x => "<li>" + esc(x) + "</li>").join("") + "</ul>" : "";
+  const rawBlock = (t) => t
+    ? '<details><summary>Text OCR brut</summary><pre class="raw">' + esc(t) + "</pre></details>" : "";
+
+  function renderReceipt(r) {
+    const name = (r.anaf && r.anaf.denumire) || r.merchantNameOCR || "Comerciant necunoscut";
+    const vatRows = (r.vatLines || []).map(v =>
+      field("TVA " + v.rate + "%", '<span class="amount">' + money(v.amount) + "</span>" +
+        (v.base != null ? ' <span class="k">(bază ' + money(v.base) + ")</span>" : ""))).join("");
+    return '<article class="doc">' +
+      '<div class="doc-head"><div>' +
+        '<div class="doc-title">' + esc(name) + "</div>" +
+        '<div class="doc-sub mono">' + (r.cui ? "CUI RO " + esc(r.cui) : esc(r.cuiOCR || "CUI necitit")) +
+          (r.bonNumber ? " · bon " + esc(r.bonNumber) : "") + "</div>" +
+      "</div>" + badge(r.anaf && r.anaf.status) + "</div>" +
+      field("Data", '<span class="mono">' + esc(r.date || "—") + (r.time ? " " + esc(r.time) : "") + "</span>") +
+      field("Total", '<span class="amount">' + money(r.total) + "</span>" +
+        (r.totalSource === "derivat_din_tva" ? '<span class="pill amber">derivat din TVA</span>' : ""), "total") +
+      vatRows +
+      field("Plată", esc(r.paymentMethod || "—")) +
+      (r.fuelLiters ? field("Carburant", esc(r.productHint || "") + ' <span class="mono">' +
+        r.fuelLiters + " L × " + r.fuelUnitPrice + "</span>") : "") +
+      field("Cont", '<span class="mono">' + esc(r.suggestedAccount || "—") + "</span>") +
+      (r.isSimplifiedInvoice
+        ? field("Regim", 'Factură simplificată <span class="pill green">TVA deductibil</span>') : "") +
+      field("Verificare matematică", r.mathVerified
+        ? '<span class="pill green">consistent ✓</span>'
+        : '<span class="pill amber">neverificat</span>') +
+      monTable(r.entries) +
+      (r.accountingNote ? '<p class="note">' + esc(r.accountingNote) + "</p>" : "") +
+      warnList(r.warnings) + rawBlock(r.rawText) +
+      "</article>";
+  }
+
+  function renderChitanta(c) {
+    const emitent = (c.emitentAnaf && c.emitentAnaf.denumire) || c.emitentNume || "—";
+    const platitor = (c.platitorAnaf && c.platitorAnaf.denumire) || c.platitorNume || "—";
+    return '<article class="doc chitanta">' +
+      '<div class="doc-head"><div>' +
+        '<div class="doc-title">Chitanță ' + esc(c.numar ? "nr. " + c.numar : "") +
+          (c.serie ? " · seria " + esc(c.serie) : "") + "</div>" +
+        '<div class="doc-sub">' + (c.directie === "incasare" ? "Încasare" : "Plată") +
+          (c.date ? ' · <span class="mono">' + esc(c.date) + "</span>" : "") + "</div>" +
+      "</div>" + badge(c.emitentAnaf && c.emitentAnaf.status) + "</div>" +
+      field("A primit", "<strong>" + esc(emitent) + "</strong>" +
+        (c.emitentCui ? ' <span class="mono">CUI ' + esc(c.emitentCui) + "</span>" : "")) +
+      (c.emitentRegCom ? field("Reg. Com.", '<span class="mono">' + esc(c.emitentRegCom) + "</span>") : "") +
+      field("De la", "<strong>" + esc(platitor) + "</strong>" +
+        (c.platitorCui ? ' <span class="mono">CUI ' + esc(c.platitorCui) + "</span>"
+         : c.platitorCnp ? ' <span class="mono">CNP ' + esc(c.platitorCnp) + "</span>" : "")) +
+      field("Suma", '<span class="amount">' + money(c.suma) + "</span>" +
+        (c.sumaConfirmata ? '<span class="pill green">cifre = litere ✓</span>'
+                          : '<span class="pill amber">fără dublă validare</span>'), "total") +
+      (c.sumaLitereText ? field("În litere", "<em>" + esc(c.sumaLitereText) + "</em>") : "") +
+      (c.reprezentand ? field("Reprezentând", esc(c.reprezentand)) : "") +
+      (c.facturaReferinta ? field("Factura referită", '<span class="mono">' + esc(c.facturaReferinta) + "</span>") : "") +
+      field("Cont", '<span class="mono">' + esc(c.suggestedAccount || "—") + "</span>") +
+      monTable(c.entries) +
+      (c.accountingNote ? '<p class="note">' + esc(c.accountingNote) + "</p>" : "") +
+      warnList(c.warnings) + rawBlock(c.rawText) +
+      "</article>";
+  }
+
+  // ------- export CSV (";" + BOM pentru Excel RO) -------
+  $("exportBtn").addEventListener("click", () => {
+    if (!lastData) return;
+    const rows = [["tip","data","numar","partener","cui","status_anaf","total","tva","cota_tva","cont","plata","verificat_matematic","observatii"]];
+    (lastData.receipts || []).forEach(r => {
+      const v = (r.vatLines && r.vatLines[0]) || {};
+      rows.push(["bon", r.date || "", r.bonNumber || "",
+        (r.anaf && r.anaf.denumire) || r.merchantNameOCR || "", r.cui || "",
+        (r.anaf && r.anaf.status) || "", num(r.total), num(v.amount), v.rate || "",
+        r.suggestedAccount || "", r.paymentMethod || "",
+        r.mathVerified ? "da" : "nu", (r.warnings || []).join(" | ")]);
+    });
+    (lastData.chitante || []).forEach(c => {
+      rows.push(["chitanta", c.date || "", c.numar || "",
+        (c.emitentAnaf && c.emitentAnaf.denumire) || c.emitentNume || "", c.emitentCui || "",
+        (c.emitentAnaf && c.emitentAnaf.status) || "", num(c.suma), "", "",
+        c.suggestedAccount || "", "numerar",
+        c.sumaConfirmata ? "da" : "nu", (c.warnings || []).join(" | ")]);
+    });
+    const csv = "\uFEFF" + rows.map(r => r.map(cell =>
+      '"' + String(cell ?? "").replace(/"/g, '""') + '"').join(";")).join("\r\n");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    a.download = "registru_ocr_" + new Date().toISOString().slice(0, 10) + ".csv";
+    a.click();
+    URL.revokeObjectURL(a.href);
+    function num(v) { return v == null ? "" : String(Number(v).toFixed(2)).replace(".", ","); }
+  });
+})();
+</script>
+</body>
+</html>

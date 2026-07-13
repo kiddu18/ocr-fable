@@ -1,0 +1,54 @@
+name: Build iOS Server (IPA)
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Unsigned IPA
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build App
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          xcodebuild clean build \
+            -project "OcrServer.xcodeproj" \
+            -scheme "OcrServer" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CONFIGURATION_BUILD_DIR=$PWD/build > build_log.txt 2>&1
+
+      - name: Show Errors
+        run: |
+          echo "==== XCODEBUILD ERRORS ===="
+          grep -A 10 -B 2 -i "error:" build_log.txt || true
+          echo "==========================="
+          if grep -q "FAIL" build_log.txt || grep -qi "error:" build_log.txt; then
+             exit 1
+          fi
+
+      - name: Package into IPA
+        run: |
+          mkdir -p Payload
+          cp -r build/OcrServer.app Payload/
+          zip -qr OcrServer.ipa Payload
+
+
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OcrServer-App
+          path: OcrServer.ipa
+          retention-days: 5

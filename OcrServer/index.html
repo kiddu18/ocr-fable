@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Accounting OCR Pipeline</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+    <!-- Phosphor Icons for modern premium icons -->
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+    <!-- SheetJS for Excel Export -->
+    <script src="https://unpkg.com/xlsx/dist/xlsx.full.min.js"></script>
+</head>
+<body>
+    <div class="app-container">
+        <aside class="sidebar">
+            <div class="brand">
+                <i class="ph ph-receipt"></i>
+                <span>OCR Pipeline</span>
+            </div>
+            <nav>
+                <a href="#" class="active" onclick="switchTab('dashboard')"><i class="ph ph-squares-four"></i> Dashboard Batch</a>
+                <a href="#" onclick="switchTab('accounts')"><i class="ph ph-book-bookmark"></i> Reguli Conturi</a>
+                <a href="#" onclick="switchTab('export')"><i class="ph ph-export"></i> Setări Export</a>
+            </nav>
+            <div class="server-config">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                    <label style="margin-bottom: 0;">Server IP (iPhone)</label>
+                    <span id="connection-status" style="font-size: 0.75rem; font-weight: 600; padding: 2px 6px; border-radius: 4px; background: var(--danger); color: white;">Deconectat</span>
+                </div>
+                <input type="text" id="server-ip" value="http://192.168.1.11:8000" placeholder="ex: http://192.168.1.x:8000" style="margin-bottom: 12px;">
+                <label>CUI Firma Mea (Cumpărător)</label>
+                <input type="text" id="buyer-cui" value="" placeholder="ex: RO12345678" style="margin-bottom: 12px;">
+                <label>Tip Documente Încărcate</label>
+                <select id="processing-mode" style="width: 100%; padding: 10px; background: var(--bg-main); border: 1px solid var(--border); color: white; border-radius: 6px; font-family: inherit; font-size: 0.9rem; outline: none; cursor: pointer;">
+                    <option value="bon">Bon Fiscal</option>
+                    <option value="chitanta">Chitanță</option>
+                </select>
+            </div>
+        </aside>
+
+        <main class="content">
+            <header>
+                <h1>Extragere Automată Date Contabile</h1>
+                <p class="subtitle">Sistem inteligent de procesare în masă (Pipeline)</p>
+            </header>
+
+            <!-- TAB: DASHBOARD -->
+            <div id="tab-dashboard" class="tab-content">
+                <div class="card upload-card" style="margin-bottom: 24px;">
+                    <div id="drop-zone" class="drop-zone">
+                        <i class="ph ph-files"></i>
+                        <h3>Trage fișierele aici (Batch Upload)</h3>
+                        <p style="color: var(--text-muted); font-size: 0.9rem; margin-top: 8px;">Poți adăuga zeci de bonuri/facturi simultan (PNG, JPG, JPEG, PDF)</p>
+                        <input type="file" id="file-input" multiple accept="image/*, .pdf" style="display: none;">
+                    </div>
+                </div>
+
+                <div class="card pipeline-card">
+                    <div class="pipeline-header">
+                        <h2>Pipeline Procesare</h2>
+                        <button id="export-bulk-btn" class="btn-primary" style="width: auto; padding: 10px 20px;"><i class="ph ph-file-xls"></i> Exportă Tot (Excel)</button>
+                    </div>
+                    
+                    <div class="table-container">
+                        <table class="pipeline-table">
+                            <thead>
+                                <tr>
+                                    <th>Status</th>
+                                    <th>Fișier</th>
+                                    <th>Tip</th>
+                                    <th>Serie</th>
+                                    <th>Număr</th>
+                                    <th>Dată</th>
+                                    <th>Furnizor (CUI)</th>
+                                    <th>Furnizor (Nume)</th>
+                                    <th>Total (fără TVA)</th>
+                                    <th>TVA Valoric</th>
+                                    <th>Cote TVA (%)</th>
+                                    <th id="header-total">Total (cu TVA)</th>
+                                    <th>Cont Sugerat</th>
+                                    <th>Acțiuni</th>
+                                </tr>
+                            </thead>
+                            <tbody id="pipeline-body">
+                                <tr id="empty-row">
+                                    <td colspan="13" style="text-align: center; color: var(--text-muted); padding: 40px;">
+                                        Niciun document în așteptare. Încarcă fișiere pentru a începe.
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <!-- Detalii bonuri/chitante randerate dinamic -->
+                <div style="margin-top: 24px;">
+                    <div id="receipts"></div>
+                    <div id="chitante"></div>
+                </div>
+            </div>
+
+            <!-- TAB: ACCOUNTS RULES -->
+            <div id="tab-accounts" class="tab-content hidden">
+                <div class="card">
+                    <h2>Reguli Sugestii Conturi (Plan Conturi 2026)</h2>
+                    <p class="subtitle" style="margin-bottom: 24px;">Adaugă cuvinte cheie locale. Datele nu ajung pe internet.</p>
+                    
+                    <div style="display: flex; gap: 12px; margin-bottom: 24px;">
+                        <input type="text" id="rule-keyword" placeholder="Cuvânt cheie (ex: OMV, CAFEA, ENEL)" style="flex: 1; padding: 10px; background: var(--bg-main); border: 1px solid var(--border); color: white; border-radius: 6px;">
+                        <input type="text" id="rule-account" placeholder="Cont (ex: 6022, 623, 605)" style="width: 150px; padding: 10px; background: var(--bg-main); border: 1px solid var(--border); color: white; border-radius: 6px;">
+                        <button class="btn-primary" style="width: auto;" onclick="addAccountRule()">Adaugă Regulă</button>
+                    </div>
+
+                    <table class="pipeline-table">
+                        <thead>
+                            <tr>
+                                <th>Cuvânt Cheie Detectat</th>
+                                <th>Cont Contabil Atribuit</th>
+                                <th>Acțiune</th>
+                            </tr>
+                        </thead>
+                        <tbody id="rules-body">
+                            <!-- Populated via JS -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- TAB: EXPORT CONFIG -->
+            <div id="tab-export" class="tab-content hidden">
+                <div class="card">
+                    <h2>Setări Export Excel</h2>
+                    <p class="subtitle" style="margin-bottom: 24px;">Configurează cum vrei să arate Excel-ul final.</p>
+                    
+                    <div style="margin-bottom: 24px; padding: 16px; background: rgba(0,0,0,0.2); border-radius: 8px;">
+                        <h3>Varianta A: Template Generat de Sistem</h3>
+                        <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 12px;">Sistemul va genera un Excel cu următoarele coloane (poți ajusta numele capetelor de tabel):</p>
+                        
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                            <div><label>Nume Fișier:</label> <input type="text" class="export-col" data-key="filename" value="Nume Fisier"></div>
+                            <div><label>Tip Document:</label> <input type="text" class="export-col" data-key="type" value="Tip Document"></div>
+                            <div><label>CUI Furnizor:</label> <input type="text" class="export-col" data-key="cui" value="CUI"></div>
+                            <div><label>Denumire Furnizor:</label> <input type="text" class="export-col" data-key="company" value="Furnizor"></div>
+                            <div><label>Total:</label> <input type="text" class="export-col" data-key="total" value="Total"></div>
+                            <div><label>Bază (fără TVA):</label> <input type="text" class="export-col" data-key="base" value="Baza"></div>
+                            <div><label>TVA Valoric:</label> <input type="text" class="export-col" data-key="vat" value="TVA"></div>
+                            <div><label>Cote TVA (%):</label> <input type="text" class="export-col" data-key="vatPercentages" value="Cote_TVA"></div>
+                            <div><label>Cont Sugerat:</label> <input type="text" class="export-col" data-key="account" value="Cont Contabil"></div>
+                            <div><label>Serie:</label> <input type="text" class="export-col" data-key="series" value="Serie"></div>
+                            <div><label>Număr:</label> <input type="text" class="export-col" data-key="number" value="Numar"></div>
+                            <div><label>Data:</label> <input type="text" class="export-col" data-key="date" value="Data"></div>
+                        </div>
+                    </div>
+
+                    <div style="padding: 16px; background: rgba(0,0,0,0.2); border-radius: 8px;">
+                        <h3>Varianta B: Încarcă Template-ul Tău Personalizat</h3>
+                        <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 12px;">Încarcă un fișier Excel și alege sub ce coloană din Excel-ul tău dorești să salvăm fiecare tip de dată extrasă de noi.</p>
+                        <input type="file" id="template-upload" accept=".xlsx" style="color: white; margin-bottom: 16px;">
+                        
+                        <div id="template-mapping-ui" class="hidden" style="margin-top: 16px; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 16px;">
+                            <h4 style="margin-bottom: 12px; color: var(--accent);">Mapare Coloane (potrivește datele noastre cu capul tău de tabel):</h4>
+                            <div id="mapping-container" style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                                <!-- Dropdowns generate dinamic in JS -->
+                            </div>
+                            <p style="color: var(--valid); font-size: 0.85rem; margin-top: 16px;"><i class="ph ph-check-circle"></i> Mapare salvată automat. Acum poți folosi butonul "Exportă Tot (Excel)".</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        </main>
+    </div>
+
+    <!-- Modals -->
+    <div id="image-modal" class="modal hidden">
+        <div class="modal-content">
+            <span class="close-modal" onclick="closeModal()">&times;</span>
+            <img id="modal-img" src="" style="max-width: 100%; max-height: 80vh; border-radius: 8px;">
+            <div id="modal-warnings" style="margin-top: 16px; color: var(--danger);"></div>
+        </div>
+    </div>
+
+    <script src="webclient_receipts.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>

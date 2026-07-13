@@ -1,0 +1,767 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Registru OCR — procesare documente contabile</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Libre+Franklin:wght@600;700;800&family=Source+Sans+3:wght@400;600&family=Source+Code+Pro:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  :root {
+    --navy: #0f2e55; --navy-2: #1d4e8f; --navy-3: #eaf0f8;
+    --gold: #b99048;
+    --ink: #16233a; --muted: #5a6b80; --line: #d9e2ec;
+    --bg: #f4f7fb; --card: #ffffff;
+    --ok-bg: #e7f3ec;  --ok-fg: #1e6b45;
+    --warn-bg: #fbf3e2; --warn-fg: #8a5d0b;
+    --bad-bg: #faeae9;  --bad-fg: #a02c26;
+    --neutral-bg: #eef1f5; --neutral-fg: #5a6b80;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
+  body {
+    font-family: "Source Sans 3", system-ui, sans-serif;
+    background: var(--bg); color: var(--ink); font-size: 15px; line-height: 1.55;
+  }
+  .mono { font-family: "Source Code Pro", monospace; font-variant-numeric: tabular-nums; }
+
+  header { background: var(--navy); border-bottom: 3px solid var(--gold); }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 0 24px; }
+  .head-inner { padding: 22px 0 18px; }
+  h1 {
+    font-family: "Libre Franklin", sans-serif; font-weight: 800;
+    font-size: clamp(20px, 3vw, 26px); letter-spacing: 0.04em;
+    text-transform: uppercase; color: #fff;
+  }
+  .tagline { color: #b9c9de; font-size: 14px; margin-top: 3px; }
+
+  main { max-width: 1240px; margin: 0 auto; padding: 26px 24px 80px; }
+
+  .upload { background: var(--card); border: 1px solid var(--line); border-radius: 4px; padding: 20px; display: grid; gap: 14px; }
+  .dropzone {
+    border: 1px dashed #a9bcd4; border-radius: 4px; background: var(--navy-3);
+    padding: 30px 20px; text-align: center; color: var(--muted); cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  .dropzone.dragover, .dropzone:hover { border-color: var(--navy-2); background: #dfe9f6; }
+  .dropzone strong { color: var(--navy); }
+  .dropzone .filename { color: var(--navy-2); font-weight: 600; margin-top: 6px; font-size: 13.5px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: end; }
+  .ctrl { display: grid; gap: 3px; }
+  .ctrl label { font-weight: 600; font-size: 12.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  select, input[type=text] {
+    font-family: inherit; font-size: 14px; border: 1px solid var(--line);
+    background: var(--card); color: var(--ink); border-radius: 3px; padding: 9px 12px;
+  }
+  button.primary {
+    font-family: inherit; background: var(--navy); color: #fff; border: none; font-weight: 600;
+    cursor: pointer; padding: 10px 26px; letter-spacing: 0.03em; text-transform: uppercase;
+    font-size: 13px; border-radius: 3px;
+  }
+  button.primary:hover { background: var(--navy-2); }
+  button.primary:disabled { background: var(--muted); cursor: wait; }
+  button.ghost {
+    font-family: inherit; font-size: 13.5px; background: none; border: 1px solid var(--navy);
+    color: var(--navy); font-weight: 600; padding: 8px 16px; cursor: pointer; border-radius: 3px;
+  }
+  button.ghost:hover { background: var(--navy); color: #fff; }
+  button.linklike { font-family: inherit; background: none; border: none; color: var(--bad-fg); cursor: pointer; font-size: 15px; padding: 0 4px; }
+  :focus-visible { outline: 3px solid var(--navy-2); outline-offset: 2px; }
+  .status { color: var(--muted); font-size: 14px; min-height: 20px; }
+  .status.error { color: var(--bad-fg); font-weight: 600; }
+
+  .totals {
+    display: none; margin-top: 24px; background: var(--navy); color: #fff; border-radius: 4px;
+    padding: 18px 22px; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px 28px;
+  }
+  .totals.visible { display: grid; }
+  .tot-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: #9fb3cd; }
+  .tot-value { font-family: "Source Code Pro", monospace; font-variant-numeric: tabular-nums; font-size: 22px; font-weight: 500; margin-top: 2px; }
+
+  section { margin-top: 30px; }
+  h2 {
+    font-family: "Libre Franklin", sans-serif; font-weight: 700; font-size: 14px;
+    text-transform: uppercase; letter-spacing: 0.12em; color: var(--navy);
+    border-bottom: 2px solid var(--navy); padding-bottom: 7px; margin-bottom: 14px;
+    display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  }
+  h2 .count { font-family: "Source Code Pro", monospace; font-weight: 400; color: var(--muted); font-size: 13px; letter-spacing: 0; text-transform: none; }
+  h2 .actions { display: flex; gap: 8px; }
+
+  /* tabelul pipeline */
+  .table-wrap { background: var(--card); border: 1px solid var(--line); border-radius: 4px; overflow-x: auto; }
+  table.pipe { width: 100%; border-collapse: collapse; font-size: 13.5px; min-width: 1100px; }
+  table.pipe th {
+    font-family: "Libre Franklin", sans-serif; font-size: 11px; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--muted); text-align: left;
+    padding: 10px 10px; border-bottom: 2px solid var(--navy); background: #fbfcfe; white-space: nowrap;
+  }
+  table.pipe td { padding: 8px 10px; border-bottom: 1px solid #eef2f7; vertical-align: top; }
+  table.pipe td.num { font-family: "Source Code Pro", monospace; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+  table.pipe td.mono { white-space: nowrap; }
+  table.pipe tr:hover td { background: #f8fafd; }
+  .badge {
+    font-size: 10.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase;
+    border-radius: 3px; padding: 3px 8px; white-space: nowrap; display: inline-block;
+  }
+  .badge.ok { background: var(--ok-bg); color: var(--ok-fg); }
+  .badge.warn { background: var(--warn-bg); color: var(--warn-fg); }
+  .badge.bad { background: var(--bad-bg); color: var(--bad-fg); }
+  .badge.neutral { background: var(--neutral-bg); color: var(--neutral-fg); }
+  td[contenteditable] { cursor: text; }
+  td[contenteditable]:hover { background: #f1f6fd; box-shadow: inset 0 -2px 0 var(--navy-2); }
+  td[contenteditable]:focus { background: #fff; outline: 2px solid var(--navy-2); outline-offset: -2px; }
+  td.edited { background: #fdf6e0; }
+  .strongcell { font-weight: 600; }
+  .hint { color: var(--muted); font-size: 12.5px; margin: 0 2px 8px; }
+
+  /* carduri detaliate */
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(430px, 1fr)); gap: 16px; }
+  @media (max-width: 520px) { .grid { grid-template-columns: 1fr; } }
+  .doc { background: var(--card); border: 1px solid var(--line); border-radius: 4px; border-top: 3px solid var(--navy); padding: 18px 18px 14px; }
+  .doc.chitanta { border-top-color: var(--gold); }
+  .doc-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 10px; }
+  .doc-title { font-weight: 600; font-size: 16px; font-family: "Libre Franklin", sans-serif; }
+  .doc-sub { color: var(--muted); font-size: 13px; }
+  .field { display: flex; justify-content: space-between; gap: 14px; padding: 4px 0; font-size: 14px; border-bottom: 1px solid #eef2f7; }
+  .field:last-of-type { border-bottom: none; }
+  .field .k { color: var(--muted); }
+  .field .v { text-align: right; }
+  .amount { font-family: "Source Code Pro", monospace; font-variant-numeric: tabular-nums; }
+  .field.total { background: var(--navy-3); margin: 4px -8px; padding: 6px 8px; border-bottom: none; border-radius: 3px; }
+  .field.total .v { font-family: "Source Code Pro", monospace; font-weight: 600; font-size: 16px; color: var(--navy); }
+  .pill { display: inline-block; font-size: 12px; border-radius: 3px; padding: 1px 8px; margin-left: 6px; }
+  .pill.green { background: var(--ok-bg); color: var(--ok-fg); }
+  .pill.amber { background: var(--warn-bg); color: var(--warn-fg); }
+  details { margin-top: 10px; }
+  summary { cursor: pointer; font-weight: 600; font-size: 13px; color: var(--navy-2); }
+  summary:hover { text-decoration: underline; }
+  table.mon { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13.5px; }
+  table.mon td { padding: 5px 8px 5px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  table.mon td.formula { font-family: "Source Code Pro", monospace; white-space: nowrap; }
+  table.mon td.sum { font-family: "Source Code Pro", monospace; text-align: right; white-space: nowrap; }
+  table.mon td.lbl { color: var(--muted); }
+  table.mon tr:last-child td { border-bottom: none; }
+  .note { color: var(--muted); font-size: 13px; margin-top: 8px; }
+  ul.warnings { margin: 10px 0 0; padding: 8px 12px 8px 28px; background: var(--warn-bg); border-left: 3px solid var(--warn-fg); border-radius: 3px; font-size: 13.5px; }
+  ul.warnings li { color: var(--warn-fg); }
+  pre.raw { font-family: "Source Code Pro", monospace; font-size: 12px; white-space: pre-wrap; background: var(--bg); border: 1px solid var(--line); border-radius: 3px; padding: 10px; margin-top: 8px; color: var(--muted); max-height: 240px; overflow: auto; }
+
+  /* reguli conturi */
+  .rules { background: var(--card); border: 1px solid var(--line); border-radius: 4px; padding: 16px 18px; }
+  .rules-row { display: flex; gap: 10px; flex-wrap: wrap; margin: 10px 0; }
+  .rules-row input { flex: 1; min-width: 160px; }
+  table.rules-tbl { width: 100%; border-collapse: collapse; font-size: 14px; margin-top: 6px; }
+  table.rules-tbl td { padding: 6px 8px; border-bottom: 1px solid #eef2f7; }
+  table.rules-tbl td.acc { font-family: "Source Code Pro", monospace; }
+
+  .empty { text-align: center; color: var(--muted); padding: 42px 20px; border: 1px dashed var(--line); border-radius: 4px; margin-top: 26px; background: var(--card); }
+  .alert {
+    display: none; margin-top: 20px; padding: 12px 16px; border-radius: 4px;
+    background: var(--warn-bg); color: var(--warn-fg); border-left: 4px solid var(--warn-fg); font-size: 14px;
+  }
+  .alert.visible { display: block; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap head-inner">
+    <h1>Registru OCR</h1>
+    <p class="tagline">Procesare în masă bonuri fiscale și chitanțe · verificare ANAF · note contabile · export Excel</p>
+  </div>
+</header>
+
+<main>
+  <!-- configurare + incarcare -->
+  <div class="upload">
+    <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Alege sau trage poze cu documente">
+      <strong>Trage aici pozele</strong> (batch — poți adăuga zeci de fișiere deodată: PNG, JPG, PDF)
+      <div class="filename" id="filename"></div>
+    </div>
+    <input type="file" id="fileInput" accept="image/*,.pdf" multiple hidden>
+    <div class="controls">
+      <div class="ctrl">
+        <label for="docType">Tip documente</label>
+        <select id="docType">
+          <option value="auto" selected>Auto (recomandat)</option>
+          <option value="bon">Bon fiscal</option>
+          <option value="chitanta">Chitanță de mână</option>
+        </select>
+      </div>
+      <div class="ctrl">
+        <label for="buyerCui">CUI firma mea (cumpărător)</label>
+        <input type="text" id="buyerCui" placeholder="ex: RO30630040" style="width:180px">
+      </div>
+      <div class="ctrl">
+        <label for="buyerName">Firma mea (nume, pt. Saga)</label>
+        <input type="text" id="buyerName" placeholder="ex: FIRMA MEA SRL" style="width:190px">
+      </div>
+      <div class="ctrl">
+        <label for="apiBase">Server (iPhone)</label>
+        <input type="text" id="apiBase" placeholder="aceeași adresă ca pagina" style="width:220px">
+      </div>
+      <button class="primary" id="processBtn" disabled>Procesează tot</button>
+      <span class="status" id="status"></span>
+    </div>
+  </div>
+
+  <div class="alert" id="legacyAlert">
+    Serverul a răspuns cu formatul <strong>vechi</strong> (fără câmpul <span class="mono">receipts</span>).
+    Buildul de pe iPhone nu conține încă pipeline-ul nou — reinstalează aplicația din Xcode cu integrarea din
+    <span class="mono">INTEGRARE_UPLOAD_V2.swift</span>.
+  </div>
+
+  <!-- sinteza -->
+  <div class="totals" id="totals">
+    <div><div class="tot-label">Documente</div><div class="tot-value" id="totDocs">0</div></div>
+    <div><div class="tot-label">Total sume</div><div class="tot-value" id="totSum">0,00 lei</div></div>
+    <div><div class="tot-label">TVA pe documente</div><div class="tot-value" id="totVat">0,00 lei</div></div>
+    <div><div class="tot-label">Confirmate ANAF</div><div class="tot-value" id="totAnaf">0 / 0</div></div>
+  </div>
+
+  <!-- pipeline -->
+  <section id="secPipeline" style="display:none">
+    <h2>Pipeline procesare
+      <span class="actions">
+        <button class="ghost" id="exportSagaBtn">Exportă Saga XML</button>
+        <button class="ghost" id="exportXlsxBtn">Exportă Excel (.xlsx)</button>
+        <button class="ghost" id="exportCsvBtn">Exportă CSV</button>
+        <button class="ghost" id="clearBtn">Golește lista</button>
+      </span>
+    </h2>
+    <p class="hint">Click pe o celulă (serie, număr, dată, CUI, furnizor, TVA, total, cont) pentru a corecta valoarea citită — corecturile intră în toate exporturile. Enter sau click în afară salvează.</p>
+    <div class="table-wrap">
+      <table class="pipe">
+        <thead><tr>
+          <th>Status</th><th>Fișier</th><th>Tip</th><th>Serie</th><th>Număr</th><th>Dată</th>
+          <th>Furnizor (CUI)</th><th>Furnizor (nume)</th>
+          <th>Bază (fără TVA)</th><th>TVA</th><th>Cote</th><th>Total</th><th>Cont</th><th></th>
+        </tr></thead>
+        <tbody id="pipeBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- reguli conturi -->
+  <section>
+    <h2>Reguli conturi <span class="count">cuvânt cheie → cont; se aplică local, peste sugestia serverului</span></h2>
+    <div class="rules">
+      <div class="rules-row">
+        <input type="text" id="ruleKw" placeholder="Cuvânt cheie (ex: OMV, ENEL, CAFEA)">
+        <input type="text" id="ruleAcc" placeholder="Cont (ex: 6022, 605, 623)" style="max-width:180px">
+        <button class="ghost" id="addRuleBtn">Adaugă regulă</button>
+      </div>
+      <table class="rules-tbl"><tbody id="rulesBody"></tbody></table>
+    </div>
+  </section>
+
+  <!-- carduri detaliate -->
+  <section id="secBonuri" style="display:none">
+    <h2>Bonuri fiscale — detalii <span class="count" id="cntBonuri"></span></h2>
+    <div class="grid" id="receipts"></div>
+  </section>
+
+  <section id="secChitante" style="display:none">
+    <h2>Chitanțe — detalii <span class="count" id="cntChitante"></span></h2>
+    <div class="grid" id="chitante"></div>
+  </section>
+
+  <div class="empty" id="emptyState">
+    Niciun document în listă. Încarcă fișiere pentru a începe — o poză poate conține mai multe documente deodată.
+  </div>
+</main>
+
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const dropzone = $("dropzone"), fileInput = $("fileInput"),
+        processBtn = $("processBtn"), statusEl = $("status");
+
+  const fmt = new Intl.NumberFormat("ro-RO", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const money = (v) => v == null ? "—" : fmt.format(Number(v)) + " lei";
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+  // ------- adresa serverului -------
+  const apiInput = $("apiBase");
+  if (location.protocol === "file:") apiInput.value = apiInput.value || "http://192.168.2.108:8000";
+  const apiBase = () => (apiInput.value || "").trim().replace(/\/+$/, "");
+
+  // ------- starea aplicatiei -------
+  // docs: {kind: "bon"|"chitanta", file: string, data: obiectul de la server}
+  let docs = [];
+  let queue = [];   // File[] in asteptare
+
+  // ------- reguli conturi (persistente local) -------
+  let rules = [];
+  try { rules = JSON.parse(localStorage.getItem("ocr_rules") || "[]"); } catch (e) { rules = []; }
+  function saveRules() { try { localStorage.setItem("ocr_rules", JSON.stringify(rules)); } catch (e) {} }
+  function renderRules() {
+    $("rulesBody").innerHTML = rules.length
+      ? rules.map((r, i) =>
+          "<tr><td>" + esc(r.kw) + '</td><td class="acc">' + esc(r.acc) + "</td>" +
+          '<td style="width:40px"><button class="linklike" data-i="' + i + '" title="Șterge">×</button></td></tr>').join("")
+      : '<tr><td colspan="3" style="color:var(--muted)">Nicio regulă definită.</td></tr>';
+    $("rulesBody").querySelectorAll("button").forEach(b =>
+      b.addEventListener("click", () => { rules.splice(Number(b.dataset.i), 1); saveRules(); renderRules(); renderAll(); }));
+  }
+  $("addRuleBtn").addEventListener("click", () => {
+    const kw = $("ruleKw").value.trim().toUpperCase();
+    const acc = $("ruleAcc").value.trim();
+    if (!kw || !acc) return;
+    rules.push({ kw, acc });
+    $("ruleKw").value = ""; $("ruleAcc").value = "";
+    saveRules(); renderRules(); renderAll();
+  });
+  renderRules();
+
+  // regula se aplica peste sugestia serverului, la afisare si export
+  function effectiveAccount(d) {
+    if (d.contManual) return d.contManual;
+    const hay = ((d.data.rawText || "") + " " + (merchantOf(d) || "")).toUpperCase();
+    for (const r of rules) if (r.kw && hay.includes(r.kw)) return r.acc + " (regulă)";
+    return d.data.suggestedAccount || "—";
+  }
+  const merchantOf = (d) => d.nameManual || (d.kind === "bon"
+    ? ((d.data.anaf && d.data.anaf.denumire) || d.data.merchantNameOCR)
+    : ((d.data.emitentAnaf && d.data.emitentAnaf.denumire) || d.data.emitentNume));
+
+  // ------- alegerea fisierelor (batch) -------
+  dropzone.addEventListener("click", () => fileInput.click());
+  dropzone.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") fileInput.click(); });
+  fileInput.addEventListener("change", () => addFiles(fileInput.files));
+  ["dragover", "dragenter"].forEach(ev => dropzone.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.add("dragover"); }));
+  ["dragleave", "drop"].forEach(ev => dropzone.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.remove("dragover"); }));
+  dropzone.addEventListener("drop", (e) => addFiles(e.dataTransfer.files));
+
+  function addFiles(list) {
+    for (const f of list) queue.push(f);
+    $("filename").textContent = queue.length + " fișier(e) în așteptare: " +
+      queue.slice(0, 4).map(f => f.name).join(", ") + (queue.length > 4 ? "…" : "");
+    processBtn.disabled = queue.length === 0;
+    statusEl.textContent = ""; statusEl.classList.remove("error");
+  }
+
+  // ------- procesare secventiala (serverul e un telefon — nu-l sufocam) -------
+  processBtn.addEventListener("click", async () => {
+    if (!queue.length) return;
+    processBtn.disabled = true;
+    let ok = 0, failed = 0;
+    const total = queue.length;
+    while (queue.length) {
+      const f = queue.shift();
+      statusEl.textContent = "Se procesează " + (ok + failed + 1) + "/" + total + ": " + f.name;
+      try {
+        const data = await uploadOne(f);
+        // detectie format vechi (fara receipts/chitante)
+        if (data.receipts === undefined && data.chitante === undefined) {
+          $("legacyAlert").classList.add("visible");
+        }
+        const before = docs.length;
+        (data.receipts || []).forEach(r => docs.push({ kind: "bon", file: f.name, data: r }));
+        (data.chitante || []).forEach(c => docs.push({ kind: "chitanta", file: f.name, data: c }));
+        if (docs.length === before) {
+          // fisier procesat, dar fara documente — arata-l explicit, cu diagnosticul serverului
+          docs.push({ kind: "gol", file: f.name,
+                      data: { message: data.message || "", ocr: data.ocr_result || "" } });
+        }
+        ok++;
+      } catch (err) {
+        failed++;
+        docs.push({ kind: "eroare", file: f.name, data: { error: err.message } });
+      }
+      renderAll();
+    }
+    statusEl.classList.toggle("error", failed > 0);
+    statusEl.textContent = "Gata: " + ok + " procesate" + (failed ? ", " + failed + " cu erori" : "") + ".";
+    $("filename").textContent = "";
+    processBtn.disabled = true;
+  });
+
+  async function uploadOne(file) {
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("doc_type", $("docType").value);
+    const myCui = $("buyerCui").value.trim().toUpperCase().replace(/^RO/, "");
+    if (myCui) { fd.append("buyer_cui", myCui); fd.append("my_cui", myCui); }
+    const res = await fetch(apiBase() + "/upload", {
+      method: "POST", body: fd, headers: { "Accept": "application/json" }
+    });
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text); }
+    catch { throw new Error("HTTP " + res.status + " — răspuns ne-JSON de la server"); }
+    if (!res.ok || data.success === false) throw new Error(data.message || data.reason || ("Eroare HTTP " + res.status));
+    return data;
+  }
+
+  // ------- randare -------
+  function badge(status) {
+    const map = {
+      confirmat_anaf: ["Confirmat ANAF", "ok"],
+      confirmat_anaf_reparat: ["ANAF · CUI reparat", "ok"],
+      cui_gasit_nume_diferit_verifica_manual: ["Nume diferit!", "bad"],
+      cui_incert_necesita_verificare: ["CUI incert", "warn"],
+      cui_negasit_anaf: ["Negăsit ANAF", "bad"],
+      fara_cui: ["Fără CUI", "bad"],
+      neverificat: ["Neverificat", "neutral"],
+    };
+    const [text, cls] = map[status] || map.neverificat;
+    return '<span class="badge ' + cls + '">' + text + "</span>";
+  }
+  const field = (k, v, extra) =>
+    '<div class="field ' + (extra || "") + '"><span class="k">' + k + '</span><span class="v">' + v + "</span></div>";
+
+  function parseMoney(s) {
+    let t = String(s).replace(/[^\d,.\-]/g, "");
+    if (t.includes(",")) t = t.replace(/\./g, "").replace(",", ".");
+    const v = parseFloat(t);
+    return isNaN(v) ? null : Math.round(v * 100) / 100;
+  }
+
+  function applyEdit(d, f, val) {
+    if (!d || (d.kind !== "bon" && d.kind !== "chitanta")) return;
+    const x = d.data, isBon = d.kind === "bon";
+    d.editedFields = d.editedFields || {};
+    d.editedFields[f] = true;
+    switch (f) {
+      case "serie": if (!isBon) x.serie = val || null; break;
+      case "numar": if (isBon) x.bonNumber = val || null; else x.numar = val || null; break;
+      case "date": x.date = val || null; break;
+      case "cui": {
+        const digits = val.toUpperCase().replace(/^RO\s*/, "").replace(/\D/g, "");
+        if (isBon) x.cui = digits || null; else x.emitentCui = digits || null;
+        break;
+      }
+      case "name": d.nameManual = val || null; break;
+      case "tva": {
+        if (isBon) {
+          if (!x.vatLines || !x.vatLines.length) x.vatLines = [{ rate: 21, amount: null, base: null }];
+          x.vatLines[0].amount = parseMoney(val);
+          x.vatLines[0].base = null;
+        }
+        break;
+      }
+      case "total": {
+        const v = parseMoney(val);
+        if (isBon) x.total = v; else x.suma = v;
+        break;
+      }
+      case "cont": d.contManual = val || null; break;
+    }
+  }
+
+  function rowFor(d, i) {
+    if (d.kind === "eroare") {
+      return "<tr><td><span class='badge bad'>Eroare</span></td><td>" + esc(d.file) +
+        "</td><td colspan='11' style='color:var(--bad-fg)'>" + esc(d.data.error) +
+        "</td><td><button class='linklike' data-i='" + i + "'>×</button></td></tr>";
+    }
+    if (d.kind === "gol") {
+      const ocr = (d.data.ocr || "").trim();
+      return "<tr><td><span class='badge warn'>0 documente</span></td><td>" + esc(d.file) +
+        "</td><td colspan='11'>Server: <em>" + esc(d.data.message || "fără mesaj") + "</em>" +
+        (ocr
+          ? "<details style='margin-top:4px'><summary>Text OCR brut (" + ocr.length + " caractere)</summary><pre class='raw'>" + esc(ocr) + "</pre></details>"
+          : " — OCR-ul nu a returnat niciun text (verifică claritatea/orientarea pozei).") +
+        "</td><td><button class='linklike' data-i='" + i + "'>×</button></td></tr>";
+    }
+    const x = d.data;
+    const isBon = d.kind === "bon";
+    const ef = d.editedFields || {};
+    const vatSum = isBon ? (x.vatLines || []).reduce((s, v) => s + (v.amount || 0), 0) : null;
+    const totalV = isBon ? x.total : x.suma;
+    const base = (totalV != null && vatSum != null) ? totalV - vatSum : null;
+    const rates = isBon ? (x.vatLines || []).map(v => v.rate + "%").join(", ") : "";
+    const st = isBon ? (x.anaf && x.anaf.status) : (x.emitentAnaf && x.emitentAnaf.status);
+    const cui = isBon ? x.cui : x.emitentCui;
+    const ed = (f, content, cls) =>
+      "<td class='" + (cls || "") + (ef[f] ? " edited" : "") +
+      "' contenteditable='true' spellcheck='false' data-i='" + i + "' data-f='" + f + "'>" +
+      content + "</td>";
+    return "<tr>" +
+      "<td>" + badge(st) + "</td>" +
+      "<td>" + esc(d.file) + "</td>" +
+      "<td>" + (isBon ? "Bon" : "Chitanță") + "</td>" +
+      (isBon ? "<td class='mono'>—</td>" : ed("serie", esc(x.serie || ""), "mono")) +
+      ed("numar", esc((isBon ? x.bonNumber : x.numar) || ""), "mono") +
+      ed("date", esc(x.date || ""), "mono") +
+      ed("cui", esc(cui || ""), "mono") +
+      ed("name", esc(merchantOf(d) || "")) +
+      "<td class='num'>" + (base != null ? fmt.format(base) : "—") + "</td>" +
+      (isBon ? ed("tva", vatSum != null ? fmt.format(vatSum) : "", "num")
+             : "<td class='num'>—</td>") +
+      "<td class='mono'>" + esc(rates || "—") + "</td>" +
+      ed("total", totalV != null ? fmt.format(totalV) : "", "num strongcell") +
+      ed("cont", esc(effectiveAccount(d)), "mono") +
+      "<td><button class='linklike' data-i='" + i + "' title='Șterge din listă'>×</button></td>" +
+    "</tr>";
+  }
+
+  function renderAll() {
+    const real = docs.filter(d => d.kind === "bon" || d.kind === "chitanta");
+    $("emptyState").style.display = docs.length ? "none" : "block";
+    $("secPipeline").style.display = docs.length ? "block" : "none";
+
+    $("pipeBody").innerHTML = docs.map(rowFor).join("");
+    $("pipeBody").querySelectorAll("button").forEach(b =>
+      b.addEventListener("click", () => { docs.splice(Number(b.dataset.i), 1); renderAll(); }));
+    $("pipeBody").querySelectorAll("td[data-f]").forEach(td => {
+      td.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); td.blur(); } });
+      td.addEventListener("blur", () => {
+        applyEdit(docs[Number(td.dataset.i)], td.dataset.f, td.textContent.trim());
+        renderAll();
+      });
+    });
+
+    let sum = 0, vat = 0, anafOk = 0, anafTotal = 0;
+    for (const d of real) {
+      const x = d.data;
+      sum += (d.kind === "bon" ? x.total : x.suma) || 0;
+      if (d.kind === "bon") vat += (x.vatLines || []).reduce((s, v) => s + (v.amount || 0), 0);
+      const st = d.kind === "bon" ? (x.anaf && x.anaf.status) : (x.emitentAnaf && x.emitentAnaf.status);
+      anafTotal++;
+      if (st === "confirmat_anaf" || st === "confirmat_anaf_reparat") anafOk++;
+    }
+    $("totDocs").textContent = real.length;
+    $("totSum").textContent = money(sum);
+    $("totVat").textContent = money(vat);
+    $("totAnaf").textContent = anafOk + " / " + anafTotal;
+    $("totals").classList.toggle("visible", docs.length > 0);
+
+    const bonuri = real.filter(d => d.kind === "bon");
+    const chit = real.filter(d => d.kind === "chitanta");
+    $("secBonuri").style.display = bonuri.length ? "block" : "none";
+    $("cntBonuri").textContent = bonuri.length ? bonuri.length + " documente" : "";
+    $("receipts").innerHTML = bonuri.map(renderReceipt).join("");
+    $("secChitante").style.display = chit.length ? "block" : "none";
+    $("cntChitante").textContent = chit.length ? chit.length + " documente" : "";
+    $("chitante").innerHTML = chit.map(renderChitanta).join("");
+  }
+
+  function monTable(entries) {
+    if (!entries || !entries.length) return "";
+    return '<details><summary>Notă contabilă propusă</summary><table class="mon">' +
+      entries.map(e =>
+        '<tr><td class="formula">' + esc(e.debit) + " = " + esc(e.credit) +
+        '</td><td class="sum">' + money(e.amount) + '</td><td class="lbl">' + esc(e.label) + "</td></tr>").join("") +
+      "</table></details>";
+  }
+  const warnList = (w) => (w && w.length) ? '<ul class="warnings">' + w.map(x => "<li>" + esc(x) + "</li>").join("") + "</ul>" : "";
+  const rawBlock = (t) => t ? '<details><summary>Text OCR brut</summary><pre class="raw">' + esc(t) + "</pre></details>" : "";
+
+  function renderReceipt(d) {
+    const r = d.data;
+    const name = (r.anaf && r.anaf.denumire) || r.merchantNameOCR || "Comerciant necunoscut";
+    const vatRows = (r.vatLines || []).map(v =>
+      field("TVA " + v.rate + "%", '<span class="amount">' + money(v.amount) + "</span>" +
+        (v.base != null ? ' <span class="k">(bază ' + money(v.base) + ")</span>" : ""))).join("");
+    return '<article class="doc">' +
+      '<div class="doc-head"><div>' +
+        '<div class="doc-title">' + esc(name) + "</div>" +
+        '<div class="doc-sub mono">' + (r.cui ? "CUI RO " + esc(r.cui) : esc(r.cuiOCR || "CUI necitit")) +
+          (r.bonNumber ? " · bon " + esc(r.bonNumber) : "") + " · " + esc(d.file) + "</div>" +
+      "</div>" + badge(r.anaf && r.anaf.status) + "</div>" +
+      field("Data", '<span class="mono">' + esc(r.date || "—") + (r.time ? " " + esc(r.time) : "") + "</span>") +
+      field("Total", '<span class="amount">' + money(r.total) + "</span>" +
+        (r.totalSource === "derivat_din_tva" ? '<span class="pill amber">derivat din TVA</span>' : ""), "total") +
+      vatRows +
+      field("Plată", esc(r.paymentMethod || "—")) +
+      (r.fuelLiters ? field("Carburant", esc(r.productHint || "") + ' <span class="mono">' + r.fuelLiters + " L × " + r.fuelUnitPrice + "</span>") : "") +
+      field("Cont", '<span class="mono">' + esc(effectiveAccount(d)) + "</span>") +
+      (r.isSimplifiedInvoice ? field("Regim", 'Factură simplificată <span class="pill green">TVA deductibil</span>') : "") +
+      field("Verificare matematică", r.mathVerified ? '<span class="pill green">consistent ✓</span>' : '<span class="pill amber">neverificat</span>') +
+      monTable(r.entries) +
+      (r.accountingNote ? '<p class="note">' + esc(r.accountingNote) + "</p>" : "") +
+      warnList(r.warnings) + rawBlock(r.rawText) +
+      "</article>";
+  }
+
+  function renderChitanta(d) {
+    const c = d.data;
+    const emitent = (c.emitentAnaf && c.emitentAnaf.denumire) || c.emitentNume || "—";
+    const platitor = (c.platitorAnaf && c.platitorAnaf.denumire) || c.platitorNume || "—";
+    return '<article class="doc chitanta">' +
+      '<div class="doc-head"><div>' +
+        '<div class="doc-title">Chitanță ' + esc(c.numar ? "nr. " + c.numar : "") + (c.serie ? " · seria " + esc(c.serie) : "") + "</div>" +
+        '<div class="doc-sub">' + (c.directie === "incasare" ? "Încasare" : "Plată") +
+          (c.date ? ' · <span class="mono">' + esc(c.date) + "</span>" : "") + " · " + esc(d.file) + "</div>" +
+      "</div>" + badge(c.emitentAnaf && c.emitentAnaf.status) + "</div>" +
+      field("A primit", "<strong>" + esc(emitent) + "</strong>" + (c.emitentCui ? ' <span class="mono">CUI ' + esc(c.emitentCui) + "</span>" : "")) +
+      (c.emitentRegCom ? field("Reg. Com.", '<span class="mono">' + esc(c.emitentRegCom) + "</span>") : "") +
+      field("De la", "<strong>" + esc(platitor) + "</strong>" +
+        (c.platitorCui ? ' <span class="mono">CUI ' + esc(c.platitorCui) + "</span>" :
+         c.platitorCnp ? ' <span class="mono">CNP ' + esc(c.platitorCnp) + "</span>" : "")) +
+      field("Suma", '<span class="amount">' + money(c.suma) + "</span>" +
+        (c.sumaConfirmata ? '<span class="pill green">cifre = litere ✓</span>' : '<span class="pill amber">fără dublă validare</span>'), "total") +
+      (c.sumaLitereText ? field("În litere", "<em>" + esc(c.sumaLitereText) + "</em>") : "") +
+      (c.reprezentand ? field("Reprezentând", esc(c.reprezentand)) : "") +
+      (c.facturaReferinta ? field("Factura referită", '<span class="mono">' + esc(c.facturaReferinta) + "</span>") : "") +
+      field("Cont", '<span class="mono">' + esc(effectiveAccount(d)) + "</span>") +
+      monTable(c.entries) +
+      (c.accountingNote ? '<p class="note">' + esc(c.accountingNote) + "</p>" : "") +
+      warnList(c.warnings) + rawBlock(c.rawText) +
+      "</article>";
+  }
+
+  // ------- export -------
+  function exportRows() {
+    const head = ["Fisier","Tip","Serie","Numar","Data","CUI","Furnizor","Baza","TVA","Cote_TVA","Total","Cont","Status_ANAF","Plata","Verificat","Observatii"];
+    const rows = [head];
+    for (const d of docs) {
+      if (d.kind !== "bon" && d.kind !== "chitanta") continue;
+      const x = d.data, isBon = d.kind === "bon";
+      const vatSum = isBon ? (x.vatLines || []).reduce((s, v) => s + (v.amount || 0), 0) : null;
+      const totalV = isBon ? x.total : x.suma;
+      rows.push([
+        d.file, isBon ? "bon" : "chitanta",
+        (!isBon && x.serie) || "", (isBon ? x.bonNumber : x.numar) || "", x.date || "",
+        (isBon ? x.cui : x.emitentCui) || "", merchantOf(d) || "",
+        totalV != null && vatSum != null ? +(totalV - vatSum).toFixed(2) : "",
+        vatSum != null ? +vatSum.toFixed(2) : "",
+        isBon ? (x.vatLines || []).map(v => v.rate).join(",") : "",
+        totalV != null ? +totalV.toFixed(2) : "",
+        effectiveAccount(d),
+        (isBon ? (x.anaf && x.anaf.status) : (x.emitentAnaf && x.emitentAnaf.status)) || "",
+        isBon ? (x.paymentMethod || "") : "numerar",
+        (isBon ? x.mathVerified : x.sumaConfirmata) ? "da" : "nu",
+        (x.warnings || []).join(" | "),
+      ]);
+    }
+    return rows;
+  }
+
+  $("exportXlsxBtn").addEventListener("click", () => {
+    if (typeof XLSX === "undefined") { statusEl.textContent = "Biblioteca XLSX nu s-a încărcat (verifică internetul)."; return; }
+    const ws = XLSX.utils.aoa_to_sheet(exportRows());
+    ws["!cols"] = [{wch:24},{wch:9},{wch:8},{wch:10},{wch:11},{wch:11},{wch:30},{wch:12},{wch:10},{wch:9},{wch:12},{wch:16},{wch:18},{wch:9},{wch:9},{wch:50}];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Registru OCR");
+    XLSX.writeFile(wb, "registru_ocr_" + new Date().toISOString().slice(0, 10) + ".xlsx");
+  });
+
+  $("exportCsvBtn").addEventListener("click", () => {
+    const csv = "\uFEFF" + exportRows().map(r => r.map(cell =>
+      '"' + String(cell ?? "").replace(/"/g, '""') + '"').join(";")).join("\r\n");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    a.download = "registru_ocr_" + new Date().toISOString().slice(0, 10) + ".csv";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+
+  // ------- export Saga XML (facturi de intrare; bonuri = FacturaTip B/C) -------
+  const xmlEsc = (v) => String(v ?? "").replace(/[<>&'"]/g, c =>
+    ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", "'": "&apos;", '"': "&quot;" }[c]));
+  const n2 = (v) => (Math.round((v || 0) * 100) / 100).toFixed(2);
+  const sagaDate = (iso) => {
+    if (!iso) return "";
+    const p = String(iso).split("-");
+    return p.length === 3 ? p[2] + "." + p[1] + "." + p[0] : "";
+  };
+
+  $("exportSagaBtn").addEventListener("click", () => {
+    statusEl.classList.remove("error");
+    const myCif = $("buyerCui").value.trim().toUpperCase().replace(/^RO\s*/, "");
+    const myName = $("buyerName").value.trim();
+    if (!myCif) {
+      statusEl.classList.add("error");
+      statusEl.textContent = "Completează „CUI firma mea” — Saga importă în Intrări doar când ClientCIF din XML e CUI-ul firmei tale.";
+      return;
+    }
+    const bonuri = docs.filter(d => d.kind === "bon");
+    let skipped = 0, count = 0;
+    let xml = '<?xml version="1.0" encoding="UTF-8"?>\n<Facturi>\n';
+    bonuri.forEach((d, idx) => {
+      const x = d.data;
+      if (x.total == null || !x.cui) { skipped++; return; }
+      count++;
+      const name = merchantOf(d) || "FURNIZOR NECUNOSCUT";
+      const acct = (String(effectiveAccount(d)).match(/\d{3,4}/) || ["628"])[0];
+      const dt = sagaDate(x.date) || sagaDate(new Date().toISOString().slice(0, 10));
+      const tip = x.isSimplifiedInvoice ? "C" : "B";  // B = bon de casa, C = bon cu cod fiscal
+
+      // liniile: una per cota de TVA; corectia de rotunjire se absoarbe in ultima baza
+      let parts = (x.vatLines || [])
+        .filter(v => v.amount != null && v.rate)
+        .map(v => ({ base: v.base != null ? v.base : Math.round(v.amount * 10000 / v.rate) / 100,
+                     vat: v.amount, rate: v.rate }));
+      if (!parts.length) parts = [{ base: x.total, vat: 0, rate: 0 }];
+      const sum = parts.reduce((a, p) => a + p.base + p.vat, 0);
+      const diff = Math.round((x.total - sum) * 100) / 100;
+      if (Math.abs(diff) > 0 && Math.abs(diff) <= 0.05) parts[parts.length - 1].base += diff;
+      const totalBase = parts.reduce((a, p) => a + p.base, 0);
+      const totalVat = parts.reduce((a, p) => a + p.vat, 0);
+
+      let lines = "";
+      parts.forEach((pt, li) => {
+        lines +=
+          "      <Linie>\n" +
+          "        <LinieNrCrt>" + (li + 1) + "</LinieNrCrt>\n" +
+          "        <Descriere>" + xmlEsc(((x.productHint || "Bon fiscal") + " " + name).slice(0, 100)) + "</Descriere>\n" +
+          "        <CodArticolFurnizor />\n        <CodArticolClient />\n        <CodBare />\n" +
+          "        <InformatiiSuplimentare />\n" +
+          "        <UM>BUC</UM>\n        <Cantitate>1</Cantitate>\n" +
+          "        <Pret>" + n2(pt.base) + "</Pret>\n" +
+          "        <Valoare>" + n2(pt.base) + "</Valoare>\n" +
+          "        <TVA>" + n2(pt.vat) + "</TVA>\n" +
+          "        <Cont>" + acct + "</Cont>\n" +
+          "      </Linie>\n";
+      });
+
+      xml +=
+        " <Factura>\n  <Antet>\n" +
+        "   <FurnizorNume>" + xmlEsc(name) + "</FurnizorNume>\n" +
+        "   <FurnizorCIF>" + xmlEsc(x.cui) + "</FurnizorCIF>\n" +
+        "   <FurnizorNrRegCom />\n   <FurnizorCapital />\n   <FurnizorAdresa>" +
+            xmlEsc((x.anaf && x.anaf.adresa) || "") + "</FurnizorAdresa>\n" +
+        "   <FurnizorBanca />\n   <FurnizorIBAN />\n   <FurnizorInformatiiSuplimentare />\n" +
+        "   <ClientNume>" + xmlEsc(myName) + "</ClientNume>\n" +
+        "   <ClientInformatiiSuplimentare />\n" +
+        "   <ClientCIF>" + xmlEsc(myCif) + "</ClientCIF>\n" +
+        "   <ClientNrRegCom />\n   <ClientAdresa />\n   <ClientBanca />\n   <ClientIBAN />\n" +
+        "   <FacturaNumar>" + xmlEsc(x.bonNumber || ("OCR" + (idx + 1))) + "</FacturaNumar>\n" +
+        "   <FacturaData>" + dt + "</FacturaData>\n" +
+        "   <FacturaScadenta>" + dt + "</FacturaScadenta>\n" +
+        "   <FacturaTaxareInversa>Nu</FacturaTaxareInversa>\n" +
+        "   <FacturaTVAIncasare>Nu</FacturaTVAIncasare>\n" +
+        "   <FacturaTip>" + tip + "</FacturaTip>\n" +
+        "   <FacturaInformatiiSuplimentare />\n" +
+        "   <FacturaMoneda>RON</FacturaMoneda>\n" +
+        "  </Antet>\n  <Detalii>\n    <Continut>\n" + lines +
+        "    </Continut>\n  </Detalii>\n  <Sumar>\n" +
+        "   <TotalValoare>" + n2(totalBase) + "</TotalValoare>\n" +
+        "   <TotalTVA>" + n2(totalVat) + "</TotalTVA>\n" +
+        "   <Total>" + n2(x.total) + "</Total>\n" +
+        "  </Sumar>\n  <Observatii>\n   <txtObservatii>" +
+            xmlEsc((x.warnings || []).join(" | ")) + "</txtObservatii>\n" +
+        "  </Observatii>\n </Factura>\n";
+    });
+    xml += "</Facturi>\n";
+
+    if (!count) {
+      statusEl.classList.add("error");
+      statusEl.textContent = "Niciun bon complet de exportat (fiecare are nevoie de CUI și total — corectează-le în tabel).";
+      return;
+    }
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([xml], { type: "application/xml;charset=utf-8" }));
+    a.download = "F_registruocr_" + new Date().toISOString().slice(0, 10).replace(/-/g, "") + ".xml";
+    a.click();
+    URL.revokeObjectURL(a.href);
+    const chit = docs.filter(d => d.kind === "chitanta").length;
+    statusEl.textContent = "Saga XML: " + count + " bonuri exportate ca facturi de intrare" +
+      (skipped ? ", " + skipped + " omise (fără CUI/total)" : "") +
+      (chit ? ". Chitanțele (" + chit + ") nu intră în XML-ul de facturi — sunt plăți, folosește Excel/CSV pentru ele." : ".");
+  });
+
+  $("clearBtn").addEventListener("click", () => { docs = []; renderAll(); });
+})();
+</script>
+</body>
+</html>
