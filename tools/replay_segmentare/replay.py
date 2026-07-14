@@ -168,3 +168,19 @@ def describe(clusters, title):
               f"n={len(c)} nume={names} bon={bons} cui={cuis} sume={sorted(set(totals))}")
 
 describe(segment(WORDS), "STAREA ACTUALA (algoritmul din telefon)")
+
+# ---------- loader pentru dump-ul de la GET /debug_clusters ----------
+def load_debug_clusters(path):
+    """Incarca JSON-ul salvat de la http://IP:8000/debug_clusters si intoarce
+    toate cuvintele (reunite din clustere) ca lista de Box, per orientare."""
+    import json
+    data = json.load(open(path, encoding="utf-8"))
+    by_turns = {}
+    for c in data.get("clusters", []):
+        by_turns.setdefault(c.get("turns", 0), []).extend(
+            Box(w["t"], w["x"], w["y"], w["w"], w["h"]) for w in c.get("words", []))
+    return by_turns
+
+if __name__ == "__main__" and len(sys.argv) > 1:
+    for turns, ws in load_debug_clusters(sys.argv[1]).items():
+        describe(segment(ws), f"replay debug_clusters (turns={turns})")

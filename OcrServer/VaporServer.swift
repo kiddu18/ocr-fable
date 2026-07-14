@@ -8,6 +8,7 @@
 import Vapor
 import Vision
 import PDFKit
+import UIKit
 
 public struct OCRRectItem: Content {
     let topLeft_x: Double
@@ -195,6 +196,19 @@ actor VaporServer {
         
         app.get(use: serveWebClient)
         app.get("webclient_index.html", use: serveWebClient)
+        // GET /debug_clusters - clusterele finale ale ultimei procesari,
+        // cu cuvintele lor (input direct pentru tools/replay_segmentare)
+        app.get("debug_clusters") { req -> Response in
+            let res = Response(status: .ok)
+            res.headers.contentType = .json
+            if let data = AccountingOrchestrator.shared.lastClustersJson {
+                res.body = .init(data: data)
+            } else {
+                res.body = .init(string: "{\"message\": \"No clusters yet. Upload an image first.\"}")
+            }
+            return res
+        }
+
         // GET /debug_boxes - returneaza ultimele box-uri OCR procesate (pentru debug)
         app.get("debug_boxes") { req -> Response in
             let res = Response(status: .ok)
@@ -275,7 +289,23 @@ actor VaporServer {
             var receiptsList: [ReceiptResult] = []
             var chitanteList: [ChitantaResult] = []
             
-            if PDFDocument(data: data) != nil {
+            // PDF-urile (scanari CamScanner etc.) trec prin ACELASI pipeline ca pozele:
+            // rasterizam fiecare pagina si o procesam ca imagine. Ramura veche de PDF
+            // ramane doar fallback, daca rasterizarea esueaza.
+            var pdfPageImages: [CGImage] = []
+            if let pdfDoc = PDFDocument(data: data) {
+                for p in 0..<pdfDoc.pageCount {
+                    guard let page = pdfDoc.page(at: p) else { continue }
+                    let bounds = page.bounds(for: .mediaBox)
+                    let scale = max(1.0, min(3.0, 2400.0 / max(bounds.width, bounds.height)))
+                    let size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+                    if let cg = page.thumbnail(of: size, for: .mediaBox).cgImage {
+                        pdfPageImages.append(cg)
+                    }
+                }
+            }
+
+            if PDFDocument(data: data) != nil && pdfPageImages.isEmpty {
                 let result = await textRecognizer.getOcrResult(data: data)
                 if let boxes = result?.boxes, !boxes.isEmpty {
                     print("===== OCR DEBUG =====")
@@ -322,19 +352,47 @@ actor VaporServer {
             } else {
                 let pro = TextRecognizerPro()
                 
-                // --- 1. Imaginea de baza (aplica EXIF-ul pozei)
-                guard let base = pro.baseCGImage(from: data) else {
+                // --- 1. Imaginile de baza: o poza simpla SAU paginile unui PDF —
+                //        ACELASI pipeline pentru amandoua.
+                var pageImages: [CGImage] = pdfPageImages
+                if pageImages.isEmpty, let single = pro.baseCGImage(from: data) {
+                    pageImages = [single]
+                }
+                guard !pageImages.isEmpty else {
                     return try Self.jsonResponse(.internalServerError, UploadResponse(
                         success: false, message: "Could not decode image",
                         ocr_result: "", image_width: 0, image_height: 0, ocr_boxes: []))
                 }
-                
+
+                receiptsList = []
+                chitanteList = []
+
+                for base in pageImages {
                 W = base.width
                 H = base.height
                 
                 // --- 2. Detectia bonurilor IN TOATE ORIENTARILE (rezolva bonul rotit 90°)
                 let detections = await pro.detectReceipts(in: base)
                 print("Bonuri detectate: \(detections.count)")
+
+                // === STOCARE PENTRU /debug_clusters ===
+                // Clusterele finale, cu cuvintele lor in spatiul imaginii ROTITE:
+                // exact input-ul necesar pentru replay-ul offline (tools/replay_segmentare).
+                do {
+                    let dump: [[String: Any]] = detections.map { det in
+                        [
+                            "turns": det.turns,
+                            "base_rect": ["x": det.baseRect.minX, "y": det.baseRect.minY,
+                                          "w": det.baseRect.width, "h": det.baseRect.height],
+                            "words": det.words.map { w in
+                                ["t": w.text, "x": w.x, "y": w.y, "w": w.w, "h": w.h]
+                            }
+                        ]
+                    }
+                    if let data = try? JSONSerialization.data(withJSONObject: ["clusters": dump]) {
+                        AccountingOrchestrator.shared.lastClustersJson = data
+                    }
+                }
                 
                 // cache pentru imaginile rotite (o rotatie per orientare folosita)
                 var rotatedCache: [Int: CGImage] = [0: base]
@@ -346,10 +404,8 @@ actor VaporServer {
                 }
                 
                 // --- 3. Per bon: crop + contrast + re-OCR curat -> extractie
-                receiptsList = []
-                chitanteList = []
-                
-                let myCui = upload.buyer_cui ?? "30630040" // CUI-ul firmei tale (config / camp in upload)
+                // CUI-ul firmei vine EXCLUSIV din camp (universal, fara default hardcodat)
+                let myCui = upload.buyer_cui
                 // selectorul din pagina: "auto" | "bon" | "chitanta" (doc_type = clientul nou, processing_mode = cel vechi)
                 let mode = (upload.doc_type ?? upload.processing_mode ?? "auto").lowercased()
                 
@@ -388,6 +444,7 @@ actor VaporServer {
                         receiptsList.append(r)
                     }
                 }
+                } // end for base in pageImages
                 
                 // --- 4. UN SINGUR batch ANAF v9 pentru toate CUI-urile din poza
                 //        (limita ANAF: 1 request/secunda -> nu apela per bon!)
@@ -1302,6 +1359,7 @@ public class AccountingOrchestrator {
     
     // Stocam ultimele box-uri procesate pentru endpoint-ul /debug_boxes
     public var lastBoxesJson: Data?
+    public var lastClustersJson: Data?
     
     public func processOcrResult(boxes: [OCRBoxItem], buyerCui: String? = nil, forcedDocumentType: String? = nil) async -> [AccountingResult] {
         // Generate textBlocks (grouped by lines) for legacy regex usage

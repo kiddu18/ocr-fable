@@ -39,7 +39,8 @@ enum ReceiptSegmenterV2 {
 
         var merged = mergeFragments(parts, medianHeight: mh)
         merged = merged.flatMap { splitByAnchors($0, medianHeight: mh) }
-        merged = merged.flatMap { enforceSingleCui($0, medianHeight: mh) }
+        merged = merged.flatMap { enforceOneHeader($0, medianHeight: mh) }
+        merged = absorbOrphans(merged, medianHeight: mh)
 
         return merged.filter { $0.count >= 12 }
             .sorted { a, b in
@@ -196,19 +197,52 @@ enum ReceiptSegmenterV2 {
         return parts.filter { $0.count >= 10 }
     }
 
-    // MARK: - Invariantul "un cluster final = cel mult un CUI de comerciant"
+    // MARK: - Invariante UNIVERSALE de segmentare (nu praguri reglate pe o poza)
     //
-    // Cand doua bonuri stau lipite (umar la umar sau cap la cap) si nici xycut,
-    // nici ancorele nu le-au despartit, taiem fortat la cel mai mare gol —
-    // intai pe orizontala, apoi pe verticala — cu praguri relaxate: stim SIGUR
-    // ca sunt bonuri diferite, pentru ca au CUI-uri de comerciant diferite.
-    // (Cazul real: Turist Service si Magistral-112 lipite lateral in poza de test.)
-    static func enforceSingleCui(_ cluster: [OCRBoxItem], medianHeight mh: Double,
-                                 depth: Int = 0) -> [[OCRBoxItem]] {
-        guard depth <= 6, merchantCuiHints(cluster).count >= 2 else { return [cluster] }
+    //  (1) Un bon are UN SINGUR antet fiscal (NUMAR BON / COD FISCAL / linie RO+cifre).
+    //      Doua CUI-uri distincte SAU doua grupuri de ancore tari => taietura fortata.
+    //  (2) Un fragment FARA antet fiscal nu e document — apartine bonului vecin
+    //      (footerul "MULTUMIM...", corpul unui bon cu antetul pe alt fragment etc.).
+    //  Garda anti-fals-pozitiv: la ancore slabe, taietura se accepta doar daca
+    //  AMBELE jumatati au antet fiscal propriu — un footer "VA MULTUMIM <FIRMA>"
+    //  nu poate rupe un bon legitim in doua.
 
-        func bestGap(axis: Character) -> (size: Double, split: Double)? {
-            let intervals = cluster.map { axis == "x" ? ($0.x, $0.x + $0.w) : ($0.y, $0.y + $0.h) }
+    static let strongAnchorRx = try! NSRegularExpression(
+        pattern: "NUMAR\\s*BON|COD\\s*FISCAL|COD\\s*IDENTIFICARE\\s*FISCALA|\\bR[O0]\\s?\\d{6,10}\\b",
+        options: [.caseInsensitive])
+    private static let strongExclRx = try! NSRegularExpression(
+        pattern: "CLIENT|CNP|CUMPARATOR|BENEF", options: [.caseInsensitive])
+
+    static func hasFiscalHeader(_ c: [OCRBoxItem]) -> Bool {
+        for l in groupLines(c) {
+            let r = NSRange(l.startIndex..., in: l)
+            if strongAnchorRx.firstMatch(in: l, range: r) != nil,
+               strongExclRx.firstMatch(in: l, range: r) == nil { return true }
+        }
+        return false
+    }
+
+    private static func strongGroupCount(_ cluster: [OCRBoxItem], mh: Double) -> Int {
+        var ys: [Double] = []
+        for (y, t) in linesWithY(cluster) {
+            let r = NSRange(t.startIndex..., in: t)
+            if strongAnchorRx.firstMatch(in: t, range: r) != nil,
+               strongExclRx.firstMatch(in: t, range: r) == nil { ys.append(y) }
+        }
+        ys.sort()
+        var groups = 0
+        var lastY = -Double.greatestFiniteMagnitude
+        for y in ys {
+            if y - lastY >= mh * 14 { groups += 1 }
+            lastY = y
+        }
+        return groups
+    }
+
+    private static func forceSplit(_ cluster: [OCRBoxItem], mh: Double,
+                                   needBothHeaders: Bool) -> ([OCRBoxItem], [OCRBoxItem])? {
+        func bestGap(alongX: Bool) -> (size: Double, split: Double)? {
+            let intervals = cluster.map { alongX ? ($0.x, $0.x + $0.w) : ($0.y, $0.y + $0.h) }
                 .sorted { $0.0 < $1.0 }
             var merged: [(Double, Double)] = [intervals[0]]
             for (a, b) in intervals.dropFirst() {
@@ -223,23 +257,72 @@ enum ReceiptSegmenterV2 {
             }
             return best
         }
+        var candidates: [(alongX: Bool, size: Double, split: Double)] = []
+        if let gx = bestGap(alongX: true), gx.size >= mh * 0.5 {
+            candidates.append((true, gx.size, gx.split))
+        }
+        if let gy = bestGap(alongX: false), gy.size >= mh * 0.8 {
+            candidates.append((false, gy.size, gy.split))
+        }
+        for cand in candidates.sorted(by: { $0.size > $1.size }) {
+            let lo: [OCRBoxItem], hi: [OCRBoxItem]
+            if cand.alongX {
+                lo = cluster.filter { $0.x + $0.w / 2 < cand.split }
+                hi = cluster.filter { $0.x + $0.w / 2 >= cand.split }
+            } else {
+                lo = cluster.filter { $0.y + $0.h / 2 < cand.split }
+                hi = cluster.filter { $0.y + $0.h / 2 >= cand.split }
+            }
+            guard lo.count >= 10, hi.count >= 10 else { continue }
+            if needBothHeaders && !(hasFiscalHeader(lo) && hasFiscalHeader(hi)) { continue }
+            return (lo, hi)
+        }
+        return nil
+    }
 
-        let gx = bestGap(axis: "x"), gy = bestGap(axis: "y")
-        let sx = gx?.size ?? 0, sy = gy?.size ?? 0
-        let okX = sx >= mh * 0.5, okY = sy >= mh * 0.8
-        guard okX || okY else { return [cluster] }
+    static func enforceOneHeader(_ cluster: [OCRBoxItem], medianHeight mh: Double,
+                                 depth: Int = 0) -> [[OCRBoxItem]] {
+        let multiCui = merchantCuiHints(cluster).count >= 2
+        let multiHdr = strongGroupCount(cluster, mh: mh) >= 2
+        guard depth <= 6, multiCui || multiHdr else { return [cluster] }
+        guard let (lo, hi) = forceSplit(cluster, mh: mh, needBothHeaders: !multiCui) else {
+            return [cluster]
+        }
+        return enforceOneHeader(lo, medianHeight: mh, depth: depth + 1)
+             + enforceOneHeader(hi, medianHeight: mh, depth: depth + 1)
+    }
 
-        let lo: [OCRBoxItem], hi: [OCRBoxItem]
-        if okX && (!okY || sx >= sy), let split = gx?.split {
-            lo = cluster.filter { $0.x + $0.w / 2 < split }
-            hi = cluster.filter { $0.x + $0.w / 2 >= split }
-        } else if let split = gy?.split {
-            lo = cluster.filter { $0.y + $0.h / 2 < split }
-            hi = cluster.filter { $0.y + $0.h / 2 >= split }
-        } else { return [cluster] }
-        guard lo.count >= 10, hi.count >= 10 else { return [cluster] }
-        return enforceSingleCui(lo, medianHeight: mh, depth: depth + 1)
-             + enforceSingleCui(hi, medianHeight: mh, depth: depth + 1)
+    static func absorbOrphans(_ clusters: [[OCRBoxItem]],
+                              medianHeight mh: Double) -> [[OCRBoxItem]] {
+        var anchored: [[OCRBoxItem]] = []
+        var orphans: [[OCRBoxItem]] = []
+        for c in clusters {
+            if hasFiscalHeader(c) { anchored.append(c) } else { orphans.append(c) }
+        }
+        guard !anchored.isEmpty else { return clusters }
+        for o in orphans {
+            let ob = bbox(o)
+            var bestIdx = -1
+            var bestTier = Int.max
+            var bestDist = Double.greatestFiniteMagnitude
+            for (i, a) in anchored.enumerated() {
+                let ab = bbox(a)
+                let inter = min(ob.maxX, ab.maxX) - max(ob.minX, ab.minX)
+                let minw = min(ob.maxX - ob.minX, ab.maxX - ab.minX)
+                let xov = (inter > 0 && minw > 0) ? inter / minw : 0
+                let vgap = max(ab.minY - ob.maxY, ob.minY - ab.maxY, 0)
+                let hgap = max(ab.minX - ob.maxX, ob.minX - ab.maxX, 0)
+                let tier = xov > 0.3 ? 0 : 1
+                let dist = tier == 0 ? vgap : (vgap * vgap + hgap * hgap).squareRoot()
+                if tier < bestTier || (tier == bestTier && dist < bestDist) {
+                    bestTier = tier; bestDist = dist; bestIdx = i
+                }
+            }
+            if bestIdx >= 0, bestDist <= mh * 20 {
+                anchored[bestIdx].append(contentsOf: o)
+            }
+        }
+        return anchored
     }
 
     // MARK: - CUI-urile de comerciant dintr-un cluster (exclude liniile CLIENT/CNP)

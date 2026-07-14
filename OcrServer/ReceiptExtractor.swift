@@ -126,7 +126,7 @@ enum RoCUI {
 
         let buyerRx = try! NSRegularExpression(pattern: "CLIENT|CUMPARATOR|BENEF|CNP")
         let ctxRx = try! NSRegularExpression(
-            pattern: "(?:COD\\s*FISCAL|COD\\s*IDENTIFICARE\\s*FISCALA|C\\.?\\s*[I1]\\.?\\s*F|\\bCUI\\b)\\s*[.:]?\\s*(?:R[O0Q])?\\s*[.:]?\\s*([A-Z0-9@]{4,10})|\\bR[O0]\\s?([0-9OQDILSZB@]{4,10})\\b",
+            pattern: "(?:COD\\s*FISCAL|COD\\s*IDENTIFICARE\\s*FISCALA|C\\.?\\s*[I1]\\.?\\s*F|\\bC\\.?\\s*F\\b|\\bCUI\\b)\\s*[.:]?\\s*(?:R[O0Q])?\\s*[.:]?\\s*([A-Z0-9@]{4,10})|\\bR[O0]\\s?([0-9OQDILSZB@]{4,10})\\b",
             options: [.caseInsensitive])
 
         var raw: [String] = []
@@ -139,6 +139,17 @@ enum RoCUI {
                     raw.append((upper as NSString).substring(with: m.range(at: g)))
                 }
             }
+        }
+
+        // Captura poate inghiti prefixul "RO" ("C.I.F.: RO17827267" -> "RO17827267"),
+        // iar repararea O->0 ar produce un fals "017827267". Eliminam prefixul.
+        raw = raw.map { tok -> String in
+            var t = tok
+            if t.count > 2, t.first == "R" {
+                let second = t[t.index(after: t.startIndex)]
+                if second == "O" || second == "0" || second == "Q" { t.removeFirst(2) }
+            }
+            return t
         }
 
         // 1) checksum direct
@@ -451,14 +462,28 @@ enum ReceiptExtractor {
         let rateRx = try! NSRegularExpression(
             pattern: "(?:COTA\\s*)?TVA\\s*[A-E]?\\s*[=:]?\\s*(\\d{1,2})(?:[.,]\\d{1,2})?\\s*%",
             options: [.caseInsensitive])
-        let tvaAmountRx = try! NSRegularExpression(pattern: "TOTAL\\s*TVA", options: [.caseInsensitive])
+        let tvaAmountRx = try! NSRegularExpression(pattern: "TOTAL\\s*TVA|TVA\\s*TOTAL",
+                                                   options: [.caseInsensitive])
+        // perechi cota -> suma cand ambele stau pe ACEEASI linie
+        // (farmacii/supermarketuri: "SUMA TVA A 21%   7,01" / "SUMA TVA B 11%   37,66")
+        var pairs: [(rate: Double, amount: Double)] = []
         for line in lines {
             let r = NSRange(line.startIndex..., in: line)
             for m in rateRx.matches(in: line, range: r) {
                 if let v = Double((line as NSString).substring(with: m.range(at: 1))),
-                   v > 0, v < 100, !rates.contains(v) {
-                    rates.append(v)
-                    if let w = RoVAT.warningForRate(v, documentDate: docDate) { warnings.append(w) }
+                   v > 0, v < 100 {
+                    if !rates.contains(v) {
+                        rates.append(v)
+                        if let w = RoVAT.warningForRate(v, documentDate: docDate) { warnings.append(w) }
+                    }
+                    if !line.uppercased().contains("TOTAL") {
+                        let ns = line as NSString
+                        if let am = FinExtract.amountRegex.matches(in: line, range: r).last,
+                           let amt = Double("\(ns.substring(with: am.range(at: 1))).\(ns.substring(with: am.range(at: 2)))"),
+                           abs(amt - v) > 0.001, !pairs.contains(where: { $0.rate == v }) {
+                            pairs.append((v, amt))
+                        }
+                    }
                 }
             }
             if tvaAmountRx.firstMatch(in: line, range: r) != nil {
@@ -470,6 +495,10 @@ enum ReceiptExtractor {
                     if let v = Double("\(i).\(f)"), !amounts.contains(v) { amounts.append(v) }
                 }
             }
+        }
+        // cand avem perechi pe >=2 cote, ele sunt sursa de adevar (aliniate corect)
+        if pairs.count >= 2 {
+            return (pairs.map { $0.rate }, pairs.map { $0.amount }, warnings)
         }
         return (rates, amounts, warnings)
     }

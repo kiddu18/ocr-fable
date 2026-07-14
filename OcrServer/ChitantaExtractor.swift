@@ -97,7 +97,7 @@ enum RoNumberWords {
 
         // bani (zecimale): "...leisicincizecibani" / "...si50bani"
         var cents = 0.0
-        if let r = s.range(of: "lei") {
+        if let r = s.range(of: "lei") ?? s.range(of: "ron") {
             let tail = String(s[r.upperBound...])
             if tail.contains("bani") {
                 let baniPart = tail.replacingOccurrences(of: "bani", with: "")
@@ -242,7 +242,7 @@ enum ChitantaExtractor {
         r.date = parseDate(linesDigits)
 
         // --- EMITENTUL (firma X, care a primit banii) — antetul tiparit
-        r.emitentNume = zone(after: ["UNITATEA", "FURNIZOR", "SOCIETATEA"], in: issuerLinesT,
+        r.emitentNume = zone(after: ["UNITATEA", "ENTITATEA", "FURNIZOR", "SOCIETATEA"], in: issuerLinesT,
                              stopBefore: ["CUI", "CIF", "COD FISCAL", "NR", "ADRESA"])
         if r.emitentNume == nil {
             // fallback: prima linie din antet cu forma juridica, sarind peste "CHITANTA"
@@ -287,7 +287,13 @@ enum ChitantaExtractor {
         // ca sa nu-l confundam cu CUI-ul emitentului din antet
         for line in payerLinesD {
             let up = normalize(line)
-            guard up.contains("CNP") || up.contains("CUI") || up.contains("CIF") else { continue }
+            // etichete uzuale SAU un CUI cu prefix RO fara nicio eticheta
+            // (chitanta DONA: "R043544049 J23/129/2021" imediat sub numele platitorului)
+            let hasLabel = up.contains("CNP") || up.contains("CUI") || up.contains("CIF")
+                || up.contains("C.F")
+            let hasRoCui = up.range(of: "\\bR[O0]\\s?\\d{6,10}\\b",
+                                    options: .regularExpression) != nil
+            guard hasLabel || hasRoCui else { continue }
             let digits = String(RoCUI.repairOCRDigits(up).filter { $0.isNumber })
             if digits.count >= 13 {
                 let cnp = String(digits.prefix(13))
@@ -305,8 +311,15 @@ enum ChitantaExtractor {
         // --- suma in cifre (fara corectie lingvistica)
         for line in linesDigits {
             let up = normalize(line)
-            guard up.contains("SUMA") || up.contains("LEI") else { continue }
+            guard up.contains("SUMA") || up.contains("LEI") || up.contains("RON") else { continue }
             if let v = FinExtract.amounts(in: line).first { r.sumaCifre = v; break }
+            // "suma de 387 46 RON" — spatiu in loc de separator zecimal (FAN Courier)
+            if let m = up.range(of: "\\b(\\d{1,5}) (\\d{2})\\b", options: .regularExpression) {
+                let parts = up[m].split(separator: " ")
+                if parts.count == 2, let a = Double(parts[0]), let b = Double(parts[1]) {
+                    r.sumaCifre = (a + b / 100).ron2; break
+                }
+            }
         }
         if r.sumaCifre == nil {
             // fallback: orice suma cu format bani de pe chitanta
