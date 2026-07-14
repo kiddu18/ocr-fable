@@ -8,10 +8,10 @@ const { normalizeOrientation, segment, groupLines, looksLikeSingleChitanta } = r
 
 const root = path.resolve(__dirname, '..', '..');
 const bonuri = JSON.parse(fs.readFileSync(path.join(__dirname, 'cases', 'bonuri.txt'), 'utf8'));
-assert.equal(segment(normalizeOrientation(bonuri)).length, 6,
-  'plansa 3x2 trebuie separata in 6 documente');
+assert.equal(segment(bonuri).length, 6,
+  'plansa verticala 3x2 trebuie normalizata automat si separata in 6 documente');
 
-const bonClusters = segment(normalizeOrientation(bonuri));
+const bonClusters = segment(bonuri);
 const douglas = bonClusters.find(c => groupLines(c).join(' ').toUpperCase().includes('DOUGLAS'));
 assert.ok(douglas, 'bonul Douglas trebuie pastrat ca document distinct');
 const itemRows = groupLines(douglas).filter(line => /(?:\s|-)\b[A-E]\b\s*$/i.test(line)
@@ -26,9 +26,9 @@ assert.equal(Math.round(itemTotal * 100) / 100, 613.10,
   'totalul lipsa poate fi reconstruit din articole fara a dubla pretul unitar');
 
 const chitante = JSON.parse(fs.readFileSync(path.join(__dirname, 'cases', 'chitante.txt'), 'utf8'));
-assert.equal(segment(normalizeOrientation(chitante.slice(0, 233))).length, 3,
+assert.equal(segment(chitante.slice(0, 249)).length, 3,
   'prima pagina PDF trebuie sa contina 3 documente');
-assert.equal(segment(normalizeOrientation(chitante.slice(233))).length, 3,
+assert.equal(segment(chitante.slice(249)).length, 3,
   'a doua pagina PDF trebuie sa contina Ameris, FAN si DONA');
 
 const chitantaWords = [
@@ -46,6 +46,28 @@ assert.equal('COTA TVA 21,00%'.match(money), null,
   'procentul TVA nu este suma de bani');
 assert.equal('Suma de 6d7,00'.match(money), null,
   'o coada numerica dintr-un token OCR corupt nu devine 7,00');
+
+const explicitNumber = /(?:NUMAR|NWUAR|NOMAR|TOMNAR|NOUAR|ANAR)\s*[:#.-]*\s*(?:[A-Z]{1,8}[., ]*)?(\d{1,16})/i;
+const weakNumber = /\bNR\.?\s*[:#.-]*\s*(\d{1,16})/i;
+const numberNoise = /REG\.?\s*COM|ORD\.?\s*REG|ADRES|CUI|CIF|IBAN|CONT|TELEFON|TEL\.?|FAX|CAPITAL|FACTUR/i;
+function documentNumber(lines) {
+  for (const rx of [explicitNumber, weakNumber]) {
+    for (const line of lines) {
+      if (rx === weakNumber && numberNoise.test(line)) continue;
+      const m = line.match(rx); if (m) return m[1];
+    }
+  }
+}
+assert.equal(documentNumber([
+  'Adresa str. Biharia nr. 67-77 Serie DSF Numar 14332',
+  'Data 14.05.2026',
+]), '14332', 'numarul chitantei are prioritate fata de nr. din adresa');
+assert.equal(documentNumber([
+  'Nr.Reg.Com. J2006004970406 Seria DSE nr. 1627',
+  'Banca Libra Bank Nr. 1827',
+]), '1827', 'numarul Registrului Comertului nu devine numarul chitantei');
+assert.equal('Chiluya Soric/Nouar: DI , 20080.'.match(explicitNumber)[1], '20080',
+  'varianta OCR Nouar cu serie inline trebuie acceptata');
 
 function samePhysical(a, b) {
   const x1 = Math.max(a.x, b.x), y1 = Math.max(a.y, b.y);
@@ -80,16 +102,24 @@ assert.match(routeSource, /TextRecognizerPro\.deduplicate\(refinedCandidates\)/,
   'documentele rafinate trebuie deduplicate din nou');
 assert.match(routeSource, /expandHorizontally: !hasHorizontalNeighbor/,
   'blocurile laterale ale unei chitante singure trebuie recuperate');
+assert.match(routeSource, /expandDownward: !hasVerticalNeighborBelow/,
+  'corpul slab de sub ultimul antet din coloana trebuie recuperat');
 assert.match(routeSource, /vatAmounts\.reduce\(0, \+\)/,
   'TVA-ul cotelor multiple trebuie agregat');
-assert.match(routeSource, /handwritingPass\(on: rotImg, clusterBoxes: clean\)/,
+assert.match(routeSource, /handwritingPass\(\s*on: rotImg,\s*clusterBoxes: clean\)/,
   'OCR-ul de mana trebuie limitat la documentul curent');
+assert.match(routeSource, /focusedChitantaFieldsPass/,
+  'campurile critice trebuie recitite separat la rezolutie marita');
 assert.doesNotMatch(chitantaSource, /flatMap \{ FinExtract\.amounts\(in: \$0\) \}\.max\(\)/,
   'cea mai mare valoare de pe formular nu este un fallback sigur');
 assert.equal(chitantaSource.includes('RAMBURS\\\\s+CONT\\\\s+COLECTOR'), true,
   'chitanta FAN trebuie clasificata dupa semantica documentului');
 assert.match(chitantaSource, /repairedAmountCandidates/,
   'sumele scrise de mana trebuie reparate contextual, nu trunchiate');
+assert.doesNotMatch(chitantaSource, /Set\(exactAmountCandidates\)\)\.sorted/,
+  'sumele candidate nu trebuie sortate crescator');
+assert.match(chitantaSource, /explicitNumberRx/,
+  'Numar/Nouar trebuie sa aiba prioritate fata de nr. din adresa');
 assert.match(chitantaSource, /payerIdRx/,
   'CUI-ul platitorului trebuie izolat de numarul Registrului Comertului');
 assert.match(anafSource, /found\.count == 1/,

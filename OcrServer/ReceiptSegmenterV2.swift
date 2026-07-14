@@ -27,7 +27,7 @@ import Foundation
 enum ReceiptSegmenterV2 {
 
     private static let chitantaTitleRx = try! NSRegularExpression(
-        pattern: "\\bCH[I1L][T7L][A-ZĂÂÎȘȚ]{3,}\\b|(?:SERIE|SERIA|SERIC)\\s*[/\\-]?\\s*(?:NUMAR|NWUAR|NOMAR|TOMNAR|ANAR)",
+        pattern: "\\bCH[I1L][T7L][A-ZĂÂÎȘȚ]{3,}\\b|(?:SERIE|SERIA|SERIC)\\s*[/\\-]?\\s*(?:NUMAR|NWUAR|NOMAR|TOMNAR|NOUAR|ANAR)",
         options: [.caseInsensitive])
 
     private static func looksLikeSingleChitanta(_ cluster: [OCRBoxItem]) -> Bool {
@@ -43,11 +43,30 @@ enum ReceiptSegmenterV2 {
 
     static func segment(_ words: [OCRBoxItem]) -> [[OCRBoxItem]] {
         guard !words.isEmpty else { return [] }
-        let heights = words.map { $0.h }.sorted()
+
+        // Vision poate recunoaste textul unui bon rotit, dar pastreaza box-urile
+        // verticale. Replay-ul offline normaliza deja acest caz; pipeline-ul Swift
+        // nu o facea si unea cate doua bonuri intr-o singura coloana (6 -> 3).
+        // Segmentam in spatiul normalizat, apoi mapam fiecare box inapoi pentru crop.
+        let verticalCount = words.filter { $0.h > $0.w && $0.text.count > 2 }.count
+        let needsRotation = verticalCount > words.count / 2
+        let originalHMax = words.map { $0.y + $0.h }.max() ?? 0
+        let input: [OCRBoxItem]
+        if needsRotation {
+            input = words.map { word in
+                OCRBoxItem(text: word.text,
+                           x: originalHMax - (word.y + word.h), y: word.x,
+                           w: word.h, h: word.w, rect: nil)
+            }
+        } else {
+            input = words
+        }
+
+        let heights = input.map { $0.h }.sorted()
         let mh = max(heights[heights.count / 2], 4.0)
 
         var parts: [[OCRBoxItem]] = []
-        xycut(words, minGapX: mh * 1.0, minGapY: mh * 1.5, into: &parts)
+        xycut(input, minGapX: mh * 1.0, minGapY: mh * 1.5, into: &parts)
         // Un bloc lateral "CHITANTA / Serie / Numar / Data" poate avea doar
         // 4-7 cuvinte; il pastram pentru reunirea semantica de mai jos.
         parts = parts.filter { part in
@@ -62,13 +81,21 @@ enum ReceiptSegmenterV2 {
         merged = merged.flatMap { enforceOneHeader($0, medianHeight: mh) }
         merged = absorbOrphans(merged, medianHeight: mh)
 
-        return merged.filter { $0.count >= 12 }
+        let result = merged.filter { $0.count >= 12 }
             .sorted { a, b in
                 let ba = bbox(a), bb2 = bbox(b)
                 let ka = Int((ba.minX / 400.0).rounded(.down))
                 let kb = Int((bb2.minX / 400.0).rounded(.down))
                 return ka != kb ? ka < kb : ba.minY < bb2.minY
             }
+        guard needsRotation else { return result }
+        return result.map { cluster in
+            cluster.map { word in
+                OCRBoxItem(text: word.text,
+                           x: word.y, y: originalHMax - (word.x + word.w),
+                           w: word.h, h: word.w, rect: nil)
+            }
+        }
     }
 
     // MARK: - XY-cut recursiv (neschimbat ca idee)

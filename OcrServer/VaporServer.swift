@@ -398,7 +398,7 @@ actor VaporServer {
                     // Daca pe acelasi rand nu exista alt document, extindem doar
                     // ORIZONTAL crop-ul. Astfel recuperam blocurile laterale
                     // Serie/Numar/Data ale formularelor, fara a lipi documentele
-                    // Ameris si FAN care sunt realmente unul langa altul.
+                    // care sunt realmente unul langa altul.
                     let a = det.baseRect
                     let hasHorizontalNeighbor = detections.enumerated().contains { pair in
                         let (otherIndex, other) = pair
@@ -414,9 +414,26 @@ actor VaporServer {
                         return yOverlap > 0.25 && xOverlap < 0.20
                             && hGap < max(a.width, b.width) * 0.80
                     }
+                    // Daca acesta este ultimul fragment pe coloana lui, crop-ul
+                    // continua pana la marginea de jos. Recupereaza corpul slab
+                    // al unei chitante al carei antet a fost singurul text vazut
+                    // in prima trecere, fara sa invadeze documentul de dedesubt.
+                    let ownRotatedBox = TextRecognizerPro.bbox(det.words)
+                    let hasVerticalNeighborBelow = detections.enumerated().contains { pair in
+                        let (otherIndex, other) = pair
+                        guard otherIndex != detIndex, other.turns == det.turns else { return false }
+                        let otherBox = TextRecognizerPro.bbox(other.words)
+                        guard otherBox.minY >= ownRotatedBox.maxY else { return false }
+                        let xInter = min(ownRotatedBox.maxX, otherBox.maxX)
+                            - max(ownRotatedBox.minX, otherBox.minX)
+                        let minWidth = min(ownRotatedBox.maxX - ownRotatedBox.minX,
+                                           otherBox.maxX - otherBox.minX)
+                        return xInter > 0 && minWidth > 0 && xInter / minWidth > 0.20
+                    }
                     let firstClean = await pro.cropAndReOCR(
                         rotatedImage: rotImg, clusterBoxes: det.words,
-                        expandHorizontally: !hasHorizontalNeighbor)
+                        expandHorizontally: !hasHorizontalNeighbor,
+                        expandDownward: !hasVerticalNeighborBelow)
 
                     // A doua segmentare este esentiala: prima trecere poate vedea
                     // o banda cu 2-3 documente, iar re-OCR-ul curat dezvaluie abia
@@ -483,10 +500,15 @@ actor VaporServer {
                     default:         treatAsChitanta = autoIsChitanta
                     }
                     if treatAsChitanta {
-                        let hwWords = await pro.handwritingPass(on: rotImg, clusterBoxes: clean)
+                        let focusedWords = await pro.focusedChitantaFieldsPass(
+                            on: rotImg, clusterBoxes: clean)
+                        let hwWords = await pro.handwritingPass(
+                            on: rotImg, clusterBoxes: clean)
+                        let focusedLines = ReceiptSegmenterV2.groupLines(focusedWords)
                         let hwLines = ReceiptSegmenterV2.groupLines(hwWords)
                         let ch = ChitantaExtractor.extract(linesText: hwLines,
                                                           linesDigits: rawLines,
+                                                          linesFocused: focusedLines,
                                                           myCui: myCui)
                         chitanteList.append(ch)
                     } else {

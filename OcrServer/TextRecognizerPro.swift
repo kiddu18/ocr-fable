@@ -188,7 +188,8 @@ final class TextRecognizerPro {
     func cropAndReOCR(rotatedImage: CGImage,
                       clusterBoxes: [OCRBoxItem],
                       marginRatio: Double = 0.03,
-                      expandHorizontally: Bool = false) async -> [OCRBoxItem] {
+                      expandHorizontally: Bool = false,
+                      expandDownward: Bool = false) async -> [OCRBoxItem] {
         guard !clusterBoxes.isEmpty else { return [] }
         let minX = clusterBoxes.map { $0.x }.min()!
         let minY = clusterBoxes.map { $0.y }.min()!
@@ -199,10 +200,12 @@ final class TextRecognizerPro {
         let cropX = expandHorizontally ? 0 : max(0, minX - mX)
         let cropMaxX = expandHorizontally ? Double(rotatedImage.width)
                                           : min(Double(rotatedImage.width), maxX + mX)
+        let cropMaxY = expandDownward ? Double(rotatedImage.height)
+                                      : min(Double(rotatedImage.height), maxY + mY)
         let cropRect = CGRect(x: cropX,
                               y: max(0, minY - mY),
                               width: cropMaxX - cropX,
-                              height: min(Double(rotatedImage.height), maxY + mY) - max(0, minY - mY))
+                              height: cropMaxY - max(0, minY - mY))
         guard let crop = rotatedImage.cropping(to: cropRect) else { return clusterBoxes }
 
         let enhanced = enhanceForThermalPrint(crop)

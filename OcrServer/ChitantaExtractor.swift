@@ -34,6 +34,8 @@
 import Foundation
 import Vision
 import CoreGraphics
+import CoreImage
+import CoreImage.CIFilterBuiltins
 
 // MARK: - DTO
 
@@ -196,7 +198,7 @@ enum ChitantaExtractor {
             return false
         }
         let title = t.range(of: "\\bCH[I1L][T7L][A-Z]{3,}\\b", options: .regularExpression) != nil
-        let formEvidence = t.range(of: "(?:SERIE|SERIA|SERIC)\\s*[/\\-]?\\s*(?:NUMAR|NWUAR|NOMAR|TOMNAR)",
+        let formEvidence = t.range(of: "(?:SERIE|SERIA|SERIC)\\s*[/\\-]?\\s*(?:NUMAR|NWUAR|NOMAR|TOMNAR|NOUAR|ANAR)",
                                    options: .regularExpression) != nil
             || (t.contains("PRIMIT DE LA") && t.contains("SUMA"))
         let courierEvidence = t.range(
@@ -209,6 +211,7 @@ enum ChitantaExtractor {
     /// `linesDigits` = linii din trecerea FARA corectie (cifre curate)
     /// `myCui`       = CUI-ul firmei tale — decide directia (plata vs incasare)
     static func extract(linesText: [String], linesDigits: [String],
+                        linesFocused: [String] = [],
                         myCui: String? = nil) -> ChitantaResult {
         var r = ChitantaResult()
         r.rawText = linesText.joined(separator: "\n")
@@ -244,28 +247,47 @@ enum ChitantaExtractor {
 
         // --- serie / numar / data. Cautarea este strict pe linii de antet;
         // "Nr.Reg.Com.", telefonul, IBAN-ul si referinta facturii sunt excluse.
-        let documentNoise = try! NSRegularExpression(
-            pattern: "REG\\.?\\s*COM|ORD\\.?\\s*REG|CUI|CIF|C\\.?F\\.?|IBAN|CONT|TELEFON|TEL\\.?|FAX|CAPITAL|FACTUR",
+        let numberNoise = try! NSRegularExpression(
+            pattern: "REG\\.?\\s*COM|ORD\\.?\\s*REG|ADRES|CUI|CIF|C\\.?F\\.?|IBAN|CONT|TELEFON|TEL\\.?|FAX|CAPITAL|FACTUR",
             options: [.caseInsensitive])
         let seriesRx = try! NSRegularExpression(
-            pattern: "(?:SERIE|SERIA|SERIC)(?:\\s*[/\\-]\\s*(?:NUMAR|NWUAR|NOMAR|TOMNAR|ANAR))?\\s*[:#.\\-]*\\s*([A-Z]{1,8})(?=\\s|[.\\-/]|\\d|$)",
+            pattern: "(?:SERIE|SERIA|SERIC)(?:\\s*[/\\-]\\s*(?:NUMAR|NWUAR|NOMAR|TOMNAR|NOUAR|ANAR))?\\s*[:#.\\-]*\\s*([A-Z]{1,8})(?=\\s|[.\\-/]|\\d|$)",
             options: [.caseInsensitive])
-        let numberRx = try! NSRegularExpression(
-            pattern: "(?:(?:SERIE|SERIA|SERIC)\\s*[/\\-]\\s*(?:NUMAR|NWUAR|NOMAR|TOMNAR|ANAR)|(?:NUMAR|NWUAR|NOMAR|TOMNAR|ANAR)|\\bNR\\.?)\\s*[:#.\\-]*\\s*(?:[A-Z]{1,8}[. ]*)?(\\d{1,16})",
+        let inlineSeriesRx = try! NSRegularExpression(
+            pattern: "(?:NUMAR|NWUAR|NOMAR|TOMNAR|NOUAR|ANAR)\\s*[:#.\\-]*\\s*([A-Z]{1,8})[., ]+\\d{1,16}",
             options: [.caseInsensitive])
-        for line in linesDigits {
+        let explicitNumberRx = try! NSRegularExpression(
+            pattern: "(?:NUMAR|NWUAR|NOMAR|TOMNAR|NOUAR|ANAR)\\s*[:#.\\-]*\\s*(?:[A-Z]{1,8}[., ]*)?(\\d{1,16})",
+            options: [.caseInsensitive])
+        let seriesNumberRx = try! NSRegularExpression(
+            pattern: "(?:SERIE|SERIA|SERIC)\\s*[:#.\\-]*\\s*[A-Z]{1,8}(?:\\s*[/.,-]\\s*|\\s+)(?:NR\\.?\\s*)?(\\d{1,16})",
+            options: [.caseInsensitive])
+        let nrNumberRx = try! NSRegularExpression(
+            pattern: "\\bNR\\.?\\s*[:#.\\-]*\\s*(\\d{1,16})",
+            options: [.caseInsensitive])
+        let headerLines = linesFocused + linesDigits + linesText
+        for line in headerLines where r.serie == nil {
             let up = normalize(line)
             let range = NSRange(up.startIndex..., in: up)
-            if documentNoise.firstMatch(in: up, range: range) != nil { continue }
-            if r.serie == nil, let m = seriesRx.firstMatch(in: up, range: range) {
+            if let m = seriesRx.firstMatch(in: up, range: range)
+                ?? inlineSeriesRx.firstMatch(in: up, range: range) {
                 r.serie = (up as NSString).substring(with: m.range(at: 1))
             }
-            if r.numar == nil, let m = numberRx.firstMatch(in: up, range: range) {
-                r.numar = (up as NSString).substring(with: m.range(at: 1))
-            }
-            if r.serie != nil && r.numar != nil { break }
         }
-        r.date = parseDate(linesDigits: linesDigits, linesText: linesText)
+        for (rx, rejectNoise) in [(explicitNumberRx, false),
+                                  (seriesNumberRx, true),
+                                  (nrNumberRx, true)] where r.numar == nil {
+            for line in headerLines {
+                let up = normalize(line)
+                let range = NSRange(up.startIndex..., in: up)
+                if rejectNoise, numberNoise.firstMatch(in: up, range: range) != nil { continue }
+                if let m = rx.firstMatch(in: up, range: range) {
+                    r.numar = (up as NSString).substring(with: m.range(at: 1))
+                    break
+                }
+            }
+        }
+        r.date = parseDate(linesDigits: linesFocused + linesDigits, linesText: linesText)
 
         // --- EMITENTUL (firma X, care a primit banii) — antetul tiparit
         r.emitentNume = zone(after: ["UNITATEA", "ENTITATEA", "FURNIZOR", "SOCIETATEA"], in: issuerLinesT,
@@ -350,8 +372,12 @@ enum ChitantaExtractor {
         // --- suma in cifre. Incercam intai citirea exacta, apoi repararea
         // caracterelor OCR numai in zona explicita "Suma". Pentru caractere
         // ambigue (de ex. D poate fi 0 sau 4) alegem doar prin acord cu suma in litere.
-        var exactAmountCandidates: [Double] = []
-        var repairedAmountCandidates: [Double] = []
+        var exactFocused: [Double] = []
+        var exactDigits: [Double] = []
+        var exactText: [Double] = []
+        var repairedFocused: [Double] = []
+        var repairedDigits: [Double] = []
+        var repairedText: [Double] = []
 
         func digitVariants(_ token: String) -> [String] {
             let alternatives: [Character: [Character]] = [
@@ -375,27 +401,41 @@ enum ChitantaExtractor {
         let fuzzyAmountRx = try! NSRegularExpression(
             pattern: "(?<![A-Z0-9])([0-9OQDILZSEAGTBH]{1,5})\\s*(?:[.,+:]|\\s)\\s*([0-9OQDILZSEAGTBH]{2})(?![A-Z0-9])",
             options: [.caseInsensitive])
-        for line in linesDigits + linesText {
-            let up = normalize(line)
-            // Tolereaza confuzii OCR uzuale: SUMA, SUMĂ, SUMK, SUMKI, SUMAI.
-            guard up.range(of: "\\bSUM(?:A|Ă|K|KI|AI)\\b", options: .regularExpression) != nil else { continue }
-            exactAmountCandidates.append(contentsOf: FinExtract.amounts(in: line))
-            let range = NSRange(up.startIndex..., in: up)
-            for match in fuzzyAmountRx.matches(in: up, range: range) {
-                let ns = up as NSString
-                let wholes = digitVariants(ns.substring(with: match.range(at: 1)))
-                let cents = digitVariants(ns.substring(with: match.range(at: 2)))
-                for whole in wholes {
-                    for cent in cents {
-                        if let value = Double("\(whole).\(cent)"), value > 0 {
-                            repairedAmountCandidates.append(value.ron2)
+        func collectAmounts(_ lines: [String], exact: inout [Double], repaired: inout [Double]) {
+            for line in lines {
+                let up = normalize(line)
+                // Tolereaza confuzii OCR uzuale doar in zona etichetata "Suma".
+                guard up.range(of: "\\bSUM(?:A|Ă|K|KI|AI)\\b", options: .regularExpression) != nil else { continue }
+                exact.append(contentsOf: FinExtract.amounts(in: line))
+                let range = NSRange(up.startIndex..., in: up)
+                for match in fuzzyAmountRx.matches(in: up, range: range) {
+                    let ns = up as NSString
+                    let wholes = digitVariants(ns.substring(with: match.range(at: 1)))
+                    let cents = digitVariants(ns.substring(with: match.range(at: 2)))
+                    for whole in wholes {
+                        for cent in cents {
+                            if let value = Double("\(whole).\(cent)"), value > 0 {
+                                repaired.append(value.ron2)
+                            }
                         }
                     }
                 }
             }
         }
-        exactAmountCandidates = Array(Set(exactAmountCandidates)).sorted()
-        repairedAmountCandidates = Array(Set(repairedAmountCandidates)).sorted()
+        collectAmounts(linesFocused, exact: &exactFocused, repaired: &repairedFocused)
+        collectAmounts(linesDigits, exact: &exactDigits, repaired: &repairedDigits)
+        collectAmounts(linesText, exact: &exactText, repaired: &repairedText)
+
+        func stableUnique(_ values: [Double]) -> [Double] {
+            var seen = Set<Int>()
+            return values.filter { seen.insert(Int(($0 * 100).rounded())).inserted }
+        }
+        exactFocused = stableUnique(exactFocused)
+        exactDigits = stableUnique(exactDigits)
+        exactText = stableUnique(exactText)
+        repairedFocused = stableUnique(repairedFocused)
+        repairedDigits = stableUnique(repairedDigits)
+        repairedText = stableUnique(repairedText)
 
         // --- suma in litere: zona "adica ..." (cu corectie + customWords)
         if let lit = zone(after: ["ADICA"], in: linesText, stopBefore: ["REPREZENTAND", "REPREZENT"]) {
@@ -403,7 +443,23 @@ enum ChitantaExtractor {
             r.sumaLitere = RoNumberWords.parse(lit)
         }
 
-        if let exact = exactAmountCandidates.first {
+        let exactAmountCandidates = stableUnique(exactFocused + exactDigits + exactText)
+        let repairedAmountCandidates = stableUnique(repairedFocused + repairedDigits + repairedText)
+        func crossPassMatch(_ preferred: [Double], _ corroborating: [Double]) -> Double? {
+            preferred.first { value in
+                corroborating.contains { abs($0 - value) < 0.01 }
+            }
+        }
+        if let wordsAmount = r.sumaLitere,
+           let agreed = exactAmountCandidates.min(by: {
+               abs($0 - wordsAmount) < abs($1 - wordsAmount)
+           }), abs(agreed - wordsAmount) <= 1.0 {
+            r.sumaCifre = agreed
+        } else if let exact = crossPassMatch(exactFocused, exactText)
+            ?? crossPassMatch(exactFocused, exactDigits)
+            ?? exactFocused.first ?? exactDigits.first ?? exactText.first {
+            // Nu sortam sumele numeric: asta ar favoriza o valoare OCR trunchiata.
+            // OCR-ul focalizat si marit are prioritate, apoi citirea originala.
             r.sumaCifre = exact
         } else if repairedAmountCandidates.count == 1 {
             r.sumaCifre = repairedAmountCandidates[0]
@@ -574,6 +630,90 @@ enum ChitantaExtractor {
 // MARK: - OCR in doua treceri pentru scris de mana
 
 extension TextRecognizerPro {
+
+    /// Reciteste la rezolutie marita numai benzile cu campuri critice.
+    /// Este o strategie generala pentru tipar termic si scris de mana slab:
+    /// nu ghiceste valori, ci ofera extractorului o a doua observatie Vision.
+    func focusedChitantaFieldsPass(on image: CGImage,
+                                   clusterBoxes: [OCRBoxItem]) async -> [OCRBoxItem] {
+        guard !clusterBoxes.isEmpty else { return [] }
+
+        func normalized(_ text: String) -> String {
+            text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "ro_RO"))
+                .uppercased()
+        }
+        let anchors = clusterBoxes.filter { word in
+            let t = normalized(word.text)
+            return t.contains("SUM") || t.contains("DATA") || t.contains("SERI")
+                || t.contains("NUMAR") || t.contains("NOUAR") || t == "NR" || t == "NR."
+        }.sorted { $0.y < $1.y }
+        guard !anchors.isEmpty else { return [] }
+
+        let minX = max(0, clusterBoxes.map { $0.x }.min()! - 20)
+        let maxX = min(Double(image.width), clusterBoxes.map { $0.x + $0.w }.max()! + 20)
+        var bands: [CGRect] = []
+        for anchor in anchors {
+            let h = max(18, anchor.h)
+            let y = max(0, anchor.y - h * 1.8)
+            let bottom = min(Double(image.height), anchor.y + anchor.h + h * 2.2)
+            let rect = CGRect(x: minX, y: y, width: maxX - minX, height: bottom - y)
+            if let last = bands.last, last.intersects(rect) {
+                bands[bands.count - 1] = last.union(rect)
+            } else {
+                bands.append(rect)
+            }
+        }
+
+        func enlarged(_ source: CGImage, factor: Int) -> CGImage? {
+            let width = source.width * factor, height = source.height * factor
+            guard width > 0, height > 0,
+                  let ctx = CGContext(data: nil, width: width, height: height,
+                                      bitsPerComponent: 8, bytesPerRow: width * 4,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return nil }
+            ctx.interpolationQuality = .high
+            ctx.draw(source, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return ctx.makeImage()
+        }
+
+        let focusedCIContext = CIContext(options: [.useSoftwareRenderer: false])
+        func highContrast(_ source: CGImage) -> CGImage? {
+            let input = CIImage(cgImage: source)
+            let controls = CIFilter.colorControls()
+            controls.inputImage = input
+            controls.saturation = 0
+            controls.contrast = 1.75
+            controls.brightness = 0.04
+            let sharp = CIFilter.sharpenLuminance()
+            sharp.inputImage = controls.outputImage ?? input
+            sharp.sharpness = 0.65
+            let output = sharp.outputImage ?? controls.outputImage ?? input
+            return focusedCIContext.createCGImage(output, from: output.extent)
+        }
+
+        var result: [OCRBoxItem] = []
+        for band in bands.prefix(10) {
+            let integral = band.integral.intersection(CGRect(x: 0, y: 0,
+                                                             width: image.width,
+                                                             height: image.height))
+            guard integral.width > 5, integral.height > 5,
+                  let crop = image.cropping(to: integral),
+                  let scaled = enlarged(crop, factor: 3) else { continue }
+            var variants = [scaled]
+            if let contrast = highContrast(scaled) { variants.append(contrast) }
+            for variant in variants {
+                let (local, _, _) = await wordBoxes(on: variant)
+                result.append(contentsOf: local.map { word in
+                    OCRBoxItem(text: word.text,
+                               x: word.x / 3 + integral.origin.x,
+                               y: word.y / 3 + integral.origin.y,
+                               w: word.w / 3, h: word.h / 3, rect: nil)
+                })
+            }
+        }
+        return result
+    }
 
     /// Ruleaza trecerea pentru scris de mana numai pe documentul curent.
     /// Coordonatele sunt mutate inapoi in spatiul imaginii rotite.
