@@ -169,18 +169,97 @@ def describe(clusters, title):
 
 describe(segment(WORDS), "STAREA ACTUALA (algoritmul din telefon)")
 
-# ---------- loader pentru dump-ul de la GET /debug_clusters ----------
-def load_debug_clusters(path):
-    """Incarca JSON-ul salvat de la http://IP:8000/debug_clusters si intoarce
-    toate cuvintele (reunite din clustere) ca lista de Box, per orientare."""
-    import json
-    data = json.load(open(path, encoding="utf-8"))
-    by_turns = {}
-    for c in data.get("clusters", []):
-        by_turns.setdefault(c.get("turns", 0), []).extend(
-            Box(w["t"], w["x"], w["y"], w["w"], w["h"]) for w in c.get("words", []))
-    return by_turns
 
-if __name__ == "__main__" and len(sys.argv) > 1:
-    for turns, ws in load_debug_clusters(sys.argv[1]).items():
-        describe(segment(ws), f"replay debug_clusters (turns={turns})")
+# ============ V5 — identic cu ReceiptSegmenterV2.swift (invariante universale) ============
+ANCHOR_V5 = re.compile(
+    r"NUMAR\s*BON|COD\s*FISCAL|COD\s*IDENTIFICARE\s*FISCALA|\bC\.?\s*I\.?\s*F\b|\bCUI\b"
+    r"|\bR[O0]\s?\d{6,10}\b|\b(?:S\.?\s?R\.?\s?L\.?|S\.?A\.?|P\.?F\.?A\.?)\b", re.I)
+STRONG_V5 = re.compile(r"NUMAR\s*BON|COD\s*FISCAL|COD\s*IDENTIFICARE\s*FISCALA|\bR[O0]\s?\d{6,10}\b", re.I)
+
+def has_fiscal_header(c):
+    return any(STRONG_V5.search(t) and not EXCL.search(t) for t in group_lines(c))
+
+def _strong_groups(cluster, mh):
+    ys = sorted(y for y, t in lines_with_y(cluster) if STRONG_V5.search(t) and not EXCL.search(t))
+    g = []
+    for y in ys:
+        if g and y - g[-1][-1] < mh * 14: g[-1].append(y)
+        else: g.append([y])
+    return g
+
+def _force_split(cluster, mh, need_both):
+    def bg(axis):
+        iv = sorted((w.x, w.x+w.w) if axis == "x" else (w.y, w.y+w.h) for w in cluster)
+        mg = [list(iv[0])]
+        for a, b in iv[1:]:
+            if a <= mg[-1][1] + 2: mg[-1][1] = max(mg[-1][1], b)
+            else: mg.append([a, b])
+        return max(((mg[i+1][0]-mg[i][1], (mg[i][1]+mg[i+1][0])/2) for i in range(len(mg)-1)), default=None)
+    gx, gy = bg("x"), bg("y")
+    cands = []
+    if gx and gx[0] >= mh*0.5: cands.append(("x", gx))
+    if gy and gy[0] >= mh*0.8: cands.append(("y", gy))
+    for axis, g in sorted(cands, key=lambda t: -t[1][0]):
+        if axis == "x":
+            lo = [w for w in cluster if w.x+w.w/2 < g[1]]; hi = [w for w in cluster if w.x+w.w/2 >= g[1]]
+        else:
+            lo = [w for w in cluster if w.y+w.h/2 < g[1]]; hi = [w for w in cluster if w.y+w.h/2 >= g[1]]
+        if len(lo) >= 10 and len(hi) >= 10 and (not need_both or (has_fiscal_header(lo) and has_fiscal_header(hi))):
+            return lo, hi
+    return None
+
+def enforce_one_header(cluster, mh, depth=0):
+    mc = len(merchant_cui_hints(cluster)) >= 2
+    mhd = len(_strong_groups(cluster, mh)) >= 2
+    if depth > 6 or not (mc or mhd): return [cluster]
+    sp = _force_split(cluster, mh, need_both=not mc)
+    if not sp: return [cluster]
+    lo, hi = sp
+    return enforce_one_header(lo, mh, depth+1) + enforce_one_header(hi, mh, depth+1)
+
+def absorb_orphans(clusters, mh):
+    anch = [c for c in clusters if has_fiscal_header(c)]
+    orph = [c for c in clusters if not has_fiscal_header(c)]
+    if not anch: return clusters
+    for o in orph:
+        ob = bbox(o); best, bk = None, None
+        for a in anch:
+            ab = bbox(a)
+            inter = min(ob[2], ab[2]) - max(ob[0], ab[0])
+            minw = min(ob[2]-ob[0], ab[2]-ab[0])
+            xov = inter/minw if inter > 0 and minw > 0 else 0
+            vg = max(ab[1]-ob[3], ob[1]-ab[3], 0); hg = max(ab[0]-ob[2], ob[0]-ab[2], 0)
+            key = (0 if xov > 0.3 else 1, vg if xov > 0.3 else (vg*vg+hg*hg)**0.5)
+            if bk is None or key < bk: best, bk = a, key
+        if best is not None and bk[1] <= mh*20: best.extend(o)
+    return anch
+
+def segment_v5(words):
+    if not words: return []
+    mh = median_h(words); parts = []
+    xycut(words, mh, mh*1.5, parts)
+    parts = [p for p in parts if len(p) >= 8]
+    m = merge_fragments(parts, mh)
+    m = [q for p in m for q in split_by_anchors(p, mh, ANCHOR_V5)]
+    m = [q for p in m for q in enforce_one_header(p, mh)]
+    m = absorb_orphans(m, mh)
+    return sorted([p for p in m if len(p) >= 12],
+                  key=lambda c: (int(bbox(c)[0]//400), bbox(c)[1]))
+
+def load_debug_boxes(path):
+    """Incarca /debug_boxes; roteste automat in spatiul de citire daca textul e vertical."""
+    import json
+    raw = json.load(open(path, encoding="utf-8"))
+    vertical = sum(1 for b in raw if b["h"] > b["w"] and len(b["text"]) > 2)
+    if vertical > len(raw) / 2:
+        Hmax = max(b["y"]+b["h"] for b in raw)
+        return [Box(b["text"], Hmax-(b["y"]+b["h"]), b["x"], b["h"], b["w"]) for b in raw]
+    return [Box(b["text"], b["x"], b["y"], b["w"], b["h"]) for b in raw]
+
+if __name__ == "__main__" and len(sys.argv) > 1 and sys.argv[1].endswith((".txt", ".json")):
+    try:
+        by_turns = load_debug_clusters(sys.argv[1])
+        for turns, ws in by_turns.items():
+            describe(segment_v5(ws), f"replay debug_clusters (turns={turns})")
+    except Exception:
+        describe(segment_v5(load_debug_boxes(sys.argv[1])), "replay debug_boxes (V5)")
