@@ -26,6 +26,19 @@ import Foundation
 
 enum ReceiptSegmenterV2 {
 
+    private static let chitantaTitleRx = try! NSRegularExpression(
+        pattern: "\\bCH[I1L][T7L][A-ZĂÂÎȘȚ]{3,}\\b|(?:SERIE|SERIA|SERIC)\\s*[/\\-]?\\s*(?:NUMAR|NWUAR|NOMAR)",
+        options: [.caseInsensitive])
+
+    private static func looksLikeSingleChitanta(_ cluster: [OCRBoxItem]) -> Bool {
+        let text = groupLines(cluster).joined(separator: " ").uppercased()
+        if text.range(of: "BON\\s+FISCAL|TOTAL\\s*TVA|CASA\\s+DE\\s+MARCAT",
+                      options: .regularExpression) != nil { return false }
+        let range = NSRange(text.startIndex..., in: text)
+        return chitantaTitleRx.firstMatch(in: text, range: range) != nil
+            || (text.contains("PRIMIT DE LA") && text.contains("SUMA"))
+    }
+
     // MARK: - API
 
     static func segment(_ words: [OCRBoxItem]) -> [[OCRBoxItem]] {
@@ -148,9 +161,14 @@ enum ReceiptSegmenterV2 {
         //    ilizibil ("Codl Identiticare Fiscala: R022254794");
         //  - antetul de firma (SRL/S.A./PFA) ancoreaza bonurile fara linie de CUI
         //    lizibila; liniile CLIENT raman excluse.
-        let anchorRx = try! NSRegularExpression(
-            pattern: "NUMAR\\s*BON|COD\\s*FISCAL|COD\\s*IDENTIFICARE\\s*FISCALA|\\bC\\.?\\s*I\\.?\\s*F\\b|\\bCUI\\b|\\bR[O0]\\s?\\d{6,10}\\b|\\b(?:S\\.?\\s?R\\.?\\s?L\\.?|S\\.?A\\.?|P\\.?F\\.?A\\.?)\\b",
-            options: [.caseInsensitive])
+        let anchorRx: NSRegularExpression
+        if looksLikeSingleChitanta(cluster) {
+            anchorRx = chitantaTitleRx
+        } else {
+            anchorRx = try! NSRegularExpression(
+                pattern: "NUMAR\\s*BON|COD\\s*FISCAL|COD\\s*IDENTIFICARE\\s*FISCALA|\\bC\\.?\\s*I\\.?\\s*F\\b|\\bCUI\\b|\\bR[O0]\\s?\\d{6,10}\\b|\\b(?:S\\.?\\s?R\\.?\\s?L\\.?|S\\.?A\\.?|P\\.?F\\.?A\\.?)\\b",
+                options: [.caseInsensitive])
+        }
         let excludeRx = try! NSRegularExpression(pattern: "CLIENT|CNP|CUMPARATOR|BENEF",
                                                  options: [.caseInsensitive])
 
@@ -216,6 +234,7 @@ enum ReceiptSegmenterV2 {
     static func hasFiscalHeader(_ c: [OCRBoxItem]) -> Bool {
         for l in groupLines(c) {
             let r = NSRange(l.startIndex..., in: l)
+            if chitantaTitleRx.firstMatch(in: l, range: r) != nil { return true }
             if strongAnchorRx.firstMatch(in: l, range: r) != nil,
                strongExclRx.firstMatch(in: l, range: r) == nil { return true }
         }
@@ -234,6 +253,22 @@ enum ReceiptSegmenterV2 {
         var lastY = -Double.greatestFiniteMagnitude
         for y in ys {
             if y - lastY >= mh * 14 { groups += 1 }
+            lastY = y
+        }
+        return groups
+    }
+
+    private static func chitantaHeaderGroupCount(_ cluster: [OCRBoxItem], mh: Double) -> Int {
+        var ys: [Double] = []
+        for (y, text) in linesWithY(cluster) {
+            let range = NSRange(text.startIndex..., in: text)
+            if chitantaTitleRx.firstMatch(in: text, range: range) != nil { ys.append(y) }
+        }
+        ys.sort()
+        var groups = 0
+        var lastY = -Double.greatestFiniteMagnitude
+        for y in ys {
+            if y - lastY >= mh * 10 { groups += 1 }
             lastY = y
         }
         return groups
@@ -282,8 +317,13 @@ enum ReceiptSegmenterV2 {
 
     static func enforceOneHeader(_ cluster: [OCRBoxItem], medianHeight mh: Double,
                                  depth: Int = 0) -> [[OCRBoxItem]] {
-        let multiCui = merchantCuiHints(cluster).count >= 2
-        let multiHdr = strongGroupCount(cluster, mh: mh) >= 2
+        // O chitanta contine legitim CUI emitent + CUI/CNP platitor. Doar doua
+        // antete de chitanta permit split-ul; al doilea CUI nu este document nou.
+        let isChitanta = looksLikeSingleChitanta(cluster)
+        let multiCui = !isChitanta && merchantCuiHints(cluster).count >= 2
+        let multiHdr = isChitanta
+            ? chitantaHeaderGroupCount(cluster, mh: mh) >= 2
+            : strongGroupCount(cluster, mh: mh) >= 2
         guard depth <= 6, multiCui || multiHdr else { return [cluster] }
         guard let (lo, hi) = forceSplit(cluster, mh: mh, needBothHeaders: !multiCui) else {
             return [cluster]

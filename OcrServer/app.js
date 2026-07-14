@@ -135,9 +135,9 @@ function renderPipeline() {
         const cuiHtml = item.status === 'done' ? `<input class="inline-input" value="${d.cui || ''}" onchange="updateItem('${item.id}', 'cui', this.value)" title="${d.companyName || ''}">` : '-';
         const companyHtml = item.status === 'done' ? `<input class="inline-input" style="width: 150px" value="${d.companyName || ''}" onchange="updateItem('${item.id}', 'companyName', this.value)">` : '-';
         
-        const baseHtml = item.status === 'done' ? (isChitanta ? '<span style="color:var(--text-muted)">-</span>' : `<input class="inline-input" style="width: 80px" value="${d.baseAmount !== undefined ? d.baseAmount : ''}" onchange="updateItem('${item.id}', 'baseAmount', this.value)">`) : '-';
-        const totalHtml = item.status === 'done' ? `<input class="inline-input" style="width: 80px" value="${d.totalAmount || ''}" onchange="updateItem('${item.id}', 'totalAmount', this.value)">` : '-';
-        const vatHtml = item.status === 'done' ? (isChitanta ? '<span style="color:var(--text-muted)">-</span>' : `<input class="inline-input" style="width: 80px" value="${d.vatAmount !== undefined ? d.vatAmount : ''}" onchange="updateItem('${item.id}', 'vatAmount', this.value)">`) : '-';
+        const baseHtml = item.status === 'done' ? (isChitanta ? '<span style="color:var(--text-muted)">-</span>' : `<input class="inline-input" style="width: 80px" value="${d.baseAmount ?? ''}" onchange="updateItem('${item.id}', 'baseAmount', this.value)">`) : '-';
+        const totalHtml = item.status === 'done' ? `<input class="inline-input" style="width: 80px" value="${d.totalAmount ?? ''}" onchange="updateItem('${item.id}', 'totalAmount', this.value)">` : '-';
+        const vatHtml = item.status === 'done' ? (isChitanta ? '<span style="color:var(--text-muted)">-</span>' : `<input class="inline-input" style="width: 80px" value="${d.vatAmount ?? ''}" onchange="updateItem('${item.id}', 'vatAmount', this.value)">`) : '-';
         const vatPctHtml = item.status === 'done' ? (isChitanta ? '<span style="color:var(--text-muted)">-</span>' : `<input class="inline-input" style="width: 60px" value="${d.vatPercentages || ''}" onchange="updateItem('${item.id}', 'vatPercentages', this.value)">`) : '-';
         const accHtml = item.status === 'done' ? `<input class="inline-input" value="${d.suggestedAccount || ''}" onchange="updateItem('${item.id}', 'suggestedAccount', this.value)">` : '-';
 

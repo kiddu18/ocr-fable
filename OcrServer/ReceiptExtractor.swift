@@ -206,13 +206,13 @@ enum FinExtract {
 
     /// Linii care NU contin sume de bani (ID-uri, autorizatii, carduri, telefoane).
     static let amountBlacklist = try! NSRegularExpression(
-        pattern: "RC\\s*:|AUTOR|NR\\.?\\s*CARD|\\bTRX\\b|CNP|C\\.?I\\.?F|TELEFON|POS\\b|EJTRZ|ID\\s*UNIC|\\bSB\\s*:|AUTORIZARE|NR\\.?\\s*AUTO",
+        pattern: "RC\\s*:|AUTOR|NR\\.?\\s*CARD|\\bTRX\\b|CNP|C\\.?I\\.?F|CUI|COD\\s+FISCAL|TELEFON|TEL\\.?\\s*[:=]|MOBIL|FAX|IBAN|CONT(?:UL)?\\s+(?:BANCAR|CURENT|RO)|BANCA|CAPITAL\\s+SOCIAL|NR\\.?\\s*(?:ORD\\.?)?\\s*REG\\.?\\s*COM|POS\\b|EJTRZ|ID\\s*UNIC|\\bSB\\s*:|AUTORIZARE|NR\\.?\\s*AUTO",
         options: [.caseInsensitive])
 
     /// O suma are OBLIGATORIU formatul \d{1,5}[.,]\d{2}. Un numar fara separator
     /// zecimal (4000884157, 30630040) nu e niciodata un total.
     static let amountRegex = try! NSRegularExpression(
-        pattern: "(?<![\\d%])(\\d{1,5})\\s?[.,]\\s?(\\d{2})(?!\\d)")
+        pattern: "(?<![\\d%])(\\d{1,5})\\s?[.,]\\s?(\\d{2})(?!\\d)(?!\\s*%)")
 
     static func amounts(in line: String) -> [Double] {
         let range = NSRange(line.startIndex..., in: line)
@@ -300,19 +300,37 @@ enum ReceiptExtractor {
         warnings.append(contentsOf: vat.warnings)
         let mainRate = vat.rates.first ?? RoVAT.validRates(documentDate: docDate).first ?? 21
 
-        let rec = FinExtract.reconcile(total: totalOCR, vat: vat.amounts.first,
-                                       rate: mainRate, allAmountsOnReceipt: allAmounts)
-        r.total = rec.total
-        r.totalSource = rec.source
-        r.mathVerified = rec.verified
-        if let w = rec.warning { warnings.append(w) }
-
         // linii TVA (suporta cote multiple pe acelasi bon, ex. restaurant 11% + 21%)
-        if vat.rates.count > 1 && vat.rates.count == vat.amounts.count {
+        if vat.rates.isEmpty {
+            // Nu presupunem automat cota curenta. Un procent lipsa din OCR nu
+            // trebuie sa transforme totalul sau alta suma intr-un TVA inventat.
+            r.total = totalOCR
+            r.totalSource = totalOCR == nil ? "lipsa" : "ocr"
+            r.mathVerified = false
+            r.vatLines = []
+            warnings.append("Cota TVA nu a fost citita explicit; TVA-ul nu a fost calculat automat.")
+        } else if vat.rates.count > 1 && vat.rates.count == vat.amounts.count {
             r.vatLines = zip(vat.rates, vat.amounts).map { (rate, amt) in
-                VatLineDTO(rate: rate, amount: amt, base: nil)
+                VatLineDTO(rate: rate, amount: amt, base: (amt * 100 / rate).ron2)
+            }
+            r.total = totalOCR
+            r.totalSource = totalOCR == nil ? "lipsa" : "ocr"
+            if let total = totalOCR {
+                let reconstructed = r.vatLines.reduce(0.0) {
+                    $0 + ($1.base ?? 0) + ($1.amount ?? 0)
+                }.ron2
+                r.mathVerified = abs(total - reconstructed) <= 0.10
+                if !r.mathVerified {
+                    warnings.append("Totalul nu se reconciliaza cu bazele si TVA-ul cotelor multiple — verifica documentul.")
+                }
             }
         } else {
+            let rec = FinExtract.reconcile(total: totalOCR, vat: vat.amounts.first,
+                                           rate: mainRate, allAmountsOnReceipt: allAmounts)
+            r.total = rec.total
+            r.totalSource = rec.source
+            r.mathVerified = rec.verified
+            if let w = rec.warning { warnings.append(w) }
             let amt = rec.vat
             let base = (r.total != nil && amt != nil) ? (r.total! - amt!).ron2 : nil
             r.vatLines = [VatLineDTO(rate: mainRate, amount: amt, base: base)]
@@ -442,12 +460,18 @@ enum ReceiptExtractor {
     private static func totalAmount(_ lines: [String]) -> Double? {
         let rx = try! NSRegularExpression(pattern: "(?<!SUB)\\bTOTAL\\b(?!\\s*TVA)",
                                           options: [.caseInsensitive])
+        let rejected = try! NSRegularExpression(
+            pattern: "SUBTOTAL|TOTAL\\s*TVA|TVA\\s*TOTAL|SUMA\\s*TVA|COTA\\s*TVA|REST|RULAJ",
+            options: [.caseInsensitive])
         for (i, line) in lines.enumerated() {
             let r = NSRange(line.startIndex..., in: line)
+            if rejected.firstMatch(in: line, range: r) != nil { continue }
             guard rx.firstMatch(in: line, range: r) != nil else { continue }
             if let amt = FinExtract.amounts(in: line).first { return amt }
             // eticheta si suma pot pica pe linii OCR diferite
             for next in lines.dropFirst(i + 1).prefix(2) {
+                let nr = NSRange(next.startIndex..., in: next)
+                if rejected.firstMatch(in: next, range: nr) != nil { continue }
                 if let amt = FinExtract.amounts(in: next).first { return amt }
             }
         }
@@ -464,31 +488,39 @@ enum ReceiptExtractor {
             options: [.caseInsensitive])
         let tvaAmountRx = try! NSRegularExpression(pattern: "TOTAL\\s*TVA|TVA\\s*TOTAL",
                                                    options: [.caseInsensitive])
-        // perechi cota -> suma cand ambele stau pe ACEEASI linie
+        // Perechi cota -> suma cand ambele stau pe ACEEASI linie. Daca Vision
+        // uneste doua randuri, asociem listele in ordinea spatiala a textului.
         // (farmacii/supermarketuri: "SUMA TVA A 21%   7,01" / "SUMA TVA B 11%   37,66")
         var pairs: [(rate: Double, amount: Double)] = []
         for line in lines {
             let r = NSRange(line.startIndex..., in: line)
-            for m in rateRx.matches(in: line, range: r) {
-                if let v = Double((line as NSString).substring(with: m.range(at: 1))),
-                   v > 0, v < 100 {
-                    if !rates.contains(v) {
-                        rates.append(v)
-                        if let w = RoVAT.warningForRate(v, documentDate: docDate) { warnings.append(w) }
-                    }
-                    if !line.uppercased().contains("TOTAL") {
-                        let ns = line as NSString
-                        if let am = FinExtract.amountRegex.matches(in: line, range: r).last,
-                           let amt = Double("\(ns.substring(with: am.range(at: 1))).\(ns.substring(with: am.range(at: 2)))"),
-                           abs(amt - v) > 0.001, !pairs.contains(where: { $0.rate == v }) {
-                            pairs.append((v, amt))
-                        }
-                    }
+            let ns = line as NSString
+            let lineRates = rateRx.matches(in: line, range: r).compactMap { m -> Double? in
+                Double(ns.substring(with: m.range(at: 1)))
+            }.filter { $0 > 0 && $0 < 100 }
+            let lineAmounts = FinExtract.amountRegex.matches(in: line, range: r).compactMap { m -> Double? in
+                let whole = ns.substring(with: m.range(at: 1))
+                let fraction = ns.substring(with: m.range(at: 2))
+                return Double("\(whole).\(fraction)")
+            }
+            for v in lineRates {
+                if !rates.contains(v) {
+                    rates.append(v)
+                    if let w = RoVAT.warningForRate(v, documentDate: docDate) { warnings.append(w) }
                 }
+            }
+            if lineRates.count == lineAmounts.count && !lineRates.isEmpty {
+                for (v, amt) in zip(lineRates, lineAmounts)
+                    where abs(amt - v) > 0.001 && !pairs.contains(where: { $0.rate == v }) {
+                    pairs.append((v, amt))
+                }
+            } else if lineRates.count == 1, let v = lineRates.first,
+                      !line.uppercased().contains("TOTAL"), let amt = lineAmounts.last,
+                      abs(amt - v) > 0.001, !pairs.contains(where: { $0.rate == v }) {
+                pairs.append((v, amt))
             }
             if tvaAmountRx.firstMatch(in: line, range: r) != nil {
                 // blacklist-ul nu se aplica aici: linia e explicit "TOTAL TVA"
-                let ns = line as NSString
                 for m in FinExtract.amountRegex.matches(in: line, range: r) {
                     let i = ns.substring(with: m.range(at: 1))
                     let f = ns.substring(with: m.range(at: 2))
@@ -576,5 +608,3 @@ enum ReceiptExtractor {
         return min(1, max(0, c)).ron2
     }
 }
-
-

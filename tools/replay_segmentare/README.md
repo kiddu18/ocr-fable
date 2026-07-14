@@ -10,6 +10,13 @@ Flux:
 4. `python3 replay.py` -> vezi clusterele, ce bon/CUI/sume contine fiecare.
 5. Ajustezi parametrii/regexurile in Python pana ies corect, apoi portezi in Swift.
 
+Pe Windows, fara Python:
+
+```powershell
+node tools\replay_segmentare\replay_node.js tools\replay_segmentare\cases\bonuri.txt
+node tools\replay_segmentare\regression_node.js
+```
+
 Cazul rezolvat cu acest banc (11.07.2026, poza cu 6 bonuri):
 - inainte: 4 clustere, campuri amestecate intre bonuri;
 - dupa (ancore extinse + invariantul un-CUI): 6/6 separate corect.

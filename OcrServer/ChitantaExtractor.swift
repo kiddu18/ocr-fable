@@ -193,8 +193,14 @@ enum ChitantaExtractor {
     static func looksLikeChitanta(_ text: String) -> Bool {
         let t = text.uppercased()
             .replacingOccurrences(of: "Ț", with: "T").replacingOccurrences(of: "Ă", with: "A")
-        return t.contains("CHITANTA")
-            && !t.contains("BON FISCAL") && !t.contains("TOTAL TVA") && !t.contains("CASA DE MARCAT")
+        if t.contains("BON FISCAL") || t.contains("TOTAL TVA") || t.contains("CASA DE MARCAT") {
+            return false
+        }
+        let title = t.range(of: "\\bCH[I1L][T7L][A-Z]{3,}\\b", options: .regularExpression) != nil
+        let formEvidence = t.range(of: "(?:SERIE|SERIA|SERIC)\\s*[/\\-]?\\s*(?:NUMAR|NWUAR|NOMAR)",
+                                   options: .regularExpression) != nil
+            || (t.contains("PRIMIT DE LA") && t.contains("SUMA"))
+        return title || formEvidence
     }
 
     /// `linesText`   = linii din trecerea CU corectie lingvistica (text de mana)
@@ -233,11 +239,28 @@ enum ChitantaExtractor {
             return nil
         }
 
-        // --- serie / numar / data (tiparite sau scrise, cifrele din trecerea fara corectie)
-        r.serie = zone(after: ["SERIA", "SERIE"], in: linesDigits, stopBefore: ["NR", "NUMAR"])?
-            .components(separatedBy: " ").first
-        if let nr = zone(after: ["NR", "NUMAR"], in: linesDigits, stopBefore: ["DATA", "DIN"]) {
-            r.numar = nr.filter { $0.isNumber }.isEmpty ? nr : String(nr.filter { $0.isNumber }.prefix(8))
+        // --- serie / numar / data. Cautarea este strict pe linii de antet;
+        // "Nr.Reg.Com.", telefonul, IBAN-ul si referinta facturii sunt excluse.
+        let documentNoise = try! NSRegularExpression(
+            pattern: "REG\\.?\\s*COM|ORD\\.?\\s*REG|CUI|CIF|C\\.?F\\.?|IBAN|CONT|TELEFON|TEL\\.?|FAX|CAPITAL|FACTUR",
+            options: [.caseInsensitive])
+        let seriesRx = try! NSRegularExpression(
+            pattern: "(?:SERIE|SERIA|SERIC)(?:\\s*[/\\-]\\s*(?:NUMAR|NWUAR|NOMAR))?\\s*[:#.\\-]*\\s*([A-Z]{1,8})(?=\\s|[.\\-/]|\\d|$)",
+            options: [.caseInsensitive])
+        let numberRx = try! NSRegularExpression(
+            pattern: "(?:(?:SERIE|SERIA|SERIC)\\s*[/\\-]\\s*(?:NUMAR|NWUAR|NOMAR)|(?:NUMAR|NWUAR|NOMAR)|\\bNR\\.?)\\s*[:#.\\-]*\\s*(?:[A-Z]{1,8}[. ]*)?(\\d{1,16})",
+            options: [.caseInsensitive])
+        for line in linesDigits {
+            let up = normalize(line)
+            let range = NSRange(up.startIndex..., in: up)
+            if documentNoise.firstMatch(in: up, range: range) != nil { continue }
+            if r.serie == nil, let m = seriesRx.firstMatch(in: up, range: range) {
+                r.serie = (up as NSString).substring(with: m.range(at: 1))
+            }
+            if r.numar == nil, let m = numberRx.firstMatch(in: up, range: range) {
+                r.numar = (up as NSString).substring(with: m.range(at: 1))
+            }
+            if r.serie != nil && r.numar != nil { break }
         }
         r.date = parseDate(linesDigits)
 
@@ -308,10 +331,12 @@ enum ChitantaExtractor {
             break
         }
 
-        // --- suma in cifre (fara corectie lingvistica)
-        for line in linesDigits {
+        // --- suma in cifre. Incercam intai trecerea fara corectie, apoi OCR-ul
+        // dedicat scrisului de mana, dar numai in zona explicita "Suma".
+        for line in linesDigits + linesText {
             let up = normalize(line)
-            guard up.contains("SUMA") || up.contains("LEI") || up.contains("RON") else { continue }
+            // Tolereaza confuzii OCR uzuale: SUMA, SUMĂ, SUMK, SUMKI, SUMAI.
+            guard up.range(of: "\\bSUM(?:A|Ă|K|KI|AI)\\b", options: .regularExpression) != nil else { continue }
             if let v = FinExtract.amounts(in: line).first { r.sumaCifre = v; break }
             // "suma de 387 46 RON" — spatiu in loc de separator zecimal (FAN Courier)
             if let m = up.range(of: "\\b(\\d{1,5}) (\\d{2})\\b", options: .regularExpression) {
@@ -321,11 +346,8 @@ enum ChitantaExtractor {
                 }
             }
         }
-        if r.sumaCifre == nil {
-            // fallback: orice suma cu format bani de pe chitanta
-            r.sumaCifre = linesDigits.flatMap { FinExtract.amounts(in: $0) }.max()
-            if r.sumaCifre != nil { warnings.append("Suma in cifre luata fara ancora 'Suma de' — verifica.") }
-        }
+        // Fara fallback "cea mai mare suma": telefonul, capitalul social sau
+        // un sold bancar nu trebuie sa devina valoarea chitantei.
 
         // --- suma in litere: zona "adica ..." (cu corectie + customWords)
         if let lit = zone(after: ["ADICA"], in: linesText, stopBefore: ["REPREZENTAND", "REPREZENT"]) {
@@ -442,6 +464,29 @@ enum ChitantaExtractor {
 // MARK: - OCR in doua treceri pentru scris de mana
 
 extension TextRecognizerPro {
+
+    /// Ruleaza trecerea pentru scris de mana numai pe documentul curent.
+    /// Coordonatele sunt mutate inapoi in spatiul imaginii rotite.
+    func handwritingPass(on image: CGImage, clusterBoxes: [OCRBoxItem],
+                         marginRatio: Double = 0.04) async -> [OCRBoxItem] {
+        guard !clusterBoxes.isEmpty else { return [] }
+        let minX = clusterBoxes.map { $0.x }.min()!
+        let minY = clusterBoxes.map { $0.y }.min()!
+        let maxX = clusterBoxes.map { $0.x + $0.w }.max()!
+        let maxY = clusterBoxes.map { $0.y + $0.h }.max()!
+        let mx = (maxX - minX) * marginRatio
+        let my = (maxY - minY) * marginRatio
+        let x = max(0, minX - mx), y = max(0, minY - my)
+        let rect = CGRect(x: x, y: y,
+                          width: min(Double(image.width), maxX + mx) - x,
+                          height: min(Double(image.height), maxY + my) - y)
+        guard let crop = image.cropping(to: rect) else { return [] }
+        let local = await handwritingPass(on: crop)
+        return local.map { word in
+            OCRBoxItem(text: word.text, x: word.x + rect.origin.x, y: word.y + rect.origin.y,
+                       w: word.w, h: word.h, rect: nil)
+        }
+    }
 
     /// Trecere OCR dedicata scrisului de mana: usesLanguageCorrection = true
     /// + customWords cu numerele romanesti in litere.

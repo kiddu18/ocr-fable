@@ -366,8 +366,9 @@ actor VaporServer {
 
                 receiptsList = []
                 chitanteList = []
+                var debugClusters: [[String: Any]] = []
 
-                for base in pageImages {
+                for (pageIndex, base) in pageImages.enumerated() {
                 W = base.width
                 H = base.height
                 
@@ -375,25 +376,6 @@ actor VaporServer {
                 let detections = await pro.detectReceipts(in: base)
                 print("Bonuri detectate: \(detections.count)")
 
-                // === STOCARE PENTRU /debug_clusters ===
-                // Clusterele finale, cu cuvintele lor in spatiul imaginii ROTITE:
-                // exact input-ul necesar pentru replay-ul offline (tools/replay_segmentare).
-                do {
-                    let dump: [[String: Any]] = detections.map { det in
-                        [
-                            "turns": det.turns,
-                            "base_rect": ["x": det.baseRect.minX, "y": det.baseRect.minY,
-                                          "w": det.baseRect.width, "h": det.baseRect.height],
-                            "words": det.words.map { w in
-                                ["t": w.text, "x": w.x, "y": w.y, "w": w.w, "h": w.h]
-                            }
-                        ]
-                    }
-                    if let data = try? JSONSerialization.data(withJSONObject: ["clusters": dump]) {
-                        AccountingOrchestrator.shared.lastClustersJson = data
-                    }
-                }
-                
                 // cache pentru imaginile rotite (o rotatie per orientare folosita)
                 var rotatedCache: [Int: CGImage] = [0: base]
                 func rotatedImage(_ turns: Int) -> CGImage {
@@ -409,10 +391,42 @@ actor VaporServer {
                 // selectorul din pagina: "auto" | "bon" | "chitanta" (doc_type = clientul nou, processing_mode = cel vechi)
                 let mode = (upload.doc_type ?? upload.processing_mode ?? "auto").lowercased()
                 
-                for (i, det) in detections.enumerated() {
+                for det in detections {
                     let rotImg = rotatedImage(det.turns)
-                    let clean = await pro.cropAndReOCR(rotatedImage: rotImg, clusterBoxes: det.words)
+                    let firstClean = await pro.cropAndReOCR(rotatedImage: rotImg, clusterBoxes: det.words)
+
+                    // A doua segmentare este esentiala: prima trecere poate vedea
+                    // o banda cu 2-3 documente, iar re-OCR-ul curat dezvaluie abia
+                    // acum golurile si antetele fiecaruia. Nu exista praguri per poza.
+                    let refined = ReceiptSegmenterV2.segment(firstClean)
+                    let subclusters = refined.count > 1 ? refined : [firstClean]
+                    if subclusters.count > 1 {
+                        print("Rafinare dupa re-OCR: 1 zona -> \(subclusters.count) documente")
+                    }
+
+                    for subcluster in subclusters {
+                    let clean: [OCRBoxItem]
+                    if subclusters.count > 1 {
+                        clean = await pro.cropAndReOCR(rotatedImage: rotImg, clusterBoxes: subcluster)
+                    } else {
+                        clean = firstClean
+                    }
                     let rawLines = ReceiptSegmenterV2.groupLines(clean)
+                    let bb = TextRecognizerPro.bbox(clean)
+                    let rotRect = CGRect(x: bb.minX, y: bb.minY,
+                                         width: bb.maxX - bb.minX, height: bb.maxY - bb.minY)
+                    let baseRect = TextRecognizerPro.mapRectToBase(
+                        rotRect, turns: det.turns, rotatedW: rotImg.width, rotatedH: rotImg.height)
+
+                    debugClusters.append([
+                        "page": pageIndex,
+                        "turns": det.turns,
+                        "base_rect": ["x": baseRect.minX, "y": baseRect.minY,
+                                      "w": baseRect.width, "h": baseRect.height],
+                        "words": clean.map { w in
+                            ["t": w.text, "x": w.x, "y": w.y, "w": w.w, "h": w.h]
+                        }
+                    ])
                     
                     let autoIsChitanta = ChitantaExtractor.looksLikeChitanta(rawLines.joined(separator: "\n"))
                     let treatAsChitanta: Bool
@@ -422,29 +436,34 @@ actor VaporServer {
                     default:         treatAsChitanta = autoIsChitanta
                     }
                     if treatAsChitanta {
-                        let hwWords = await pro.handwritingPass(on: rotImg)
+                        let hwWords = await pro.handwritingPass(on: rotImg, clusterBoxes: clean)
                         let hwLines = ReceiptSegmenterV2.groupLines(hwWords)
-                        var ch = ChitantaExtractor.extract(linesText: hwLines,
-                                                           linesDigits: rawLines,
-                                                           myCui: myCui)
-                        // We map the clean words back to base image space for debug overlay
-                        allBoxesOut.append(contentsOf: TextRecognizerPro.mapWordsToBase(
-                            clean, turns: det.turns, rotatedW: rotImg.width, rotatedH: rotImg.height))
+                        let ch = ChitantaExtractor.extract(linesText: hwLines,
+                                                          linesDigits: rawLines,
+                                                          myCui: myCui)
                         chitanteList.append(ch)
                     } else {
-                        var r = ReceiptExtractor.extract(lines: rawLines, index: i, buyerCuiHint: upload.buyer_cui)
+                        var r = ReceiptExtractor.extract(lines: rawLines, index: receiptsList.count,
+                                                         buyerCuiHint: upload.buyer_cui)
                         r.orientation = det.turns
-                        r.bboxX = Double(det.baseRect.minX)
-                        r.bboxY = Double(det.baseRect.minY)
-                        r.bboxW = Double(det.baseRect.width)
-                        r.bboxH = Double(det.baseRect.height)
-                        // We map the clean words back to base image space for debug overlay
-                        allBoxesOut.append(contentsOf: TextRecognizerPro.mapWordsToBase(
-                            clean, turns: det.turns, rotatedW: rotImg.width, rotatedH: rotImg.height))
+                        r.bboxX = Double(baseRect.minX)
+                        r.bboxY = Double(baseRect.minY)
+                        r.bboxW = Double(baseRect.width)
+                        r.bboxH = Double(baseRect.height)
                         receiptsList.append(r)
                     }
+                    // Debug overlay-ul contine fiecare document o singura data.
+                    allBoxesOut.append(contentsOf: TextRecognizerPro.mapWordsToBase(
+                        clean, turns: det.turns, rotatedW: rotImg.width, rotatedH: rotImg.height))
+                    } // end for subcluster
                 }
                 } // end for base in pageImages
+
+                // /debug_clusters pastreaza toate paginile, nu doar ultima pagina PDF.
+                if let clustersData = try? JSONSerialization.data(
+                    withJSONObject: ["clusters": debugClusters]) {
+                    AccountingOrchestrator.shared.lastClustersJson = clustersData
+                }
                 
                 // --- 4. UN SINGUR batch ANAF v9 pentru toate CUI-urile din poza
                 //        (limita ANAF: 1 request/secunda -> nu apela per bon!)
@@ -538,13 +557,26 @@ actor VaporServer {
                     acc.companyIsVatPayer = r.anaf.scpTVA
                     acc.totalAmount = r.total
                     acc.totalRequiresVerification = !r.mathVerified
-                    acc.vatAmount = r.vatLines.first?.amount
+                    let vatAmounts = r.vatLines.compactMap { $0.amount }
+                    let vatBases = r.vatLines.compactMap { $0.base }
+                    let totalVat = vatAmounts.isEmpty ? nil : vatAmounts.reduce(0, +).ron2
+                    acc.vatAmount = totalVat
                     acc.vatRequiresVerification = !r.mathVerified
-                    acc.vatPercentages = r.vatLines.first.map { String($0.rate) }
-                    if let base = r.vatLines.first?.base {
-                        acc.baseAmount = base
-                    } else if let total = r.total, let vat = r.vatLines.first?.amount {
-                        acc.baseAmount = total - vat
+                    acc.vatPercentages = r.vatLines.isEmpty ? nil : r.vatLines
+                        .map { $0.rate.rounded() == $0.rate ? "\(Int($0.rate))%" : "\($0.rate)%" }
+                        .joined(separator: ", ")
+                    acc.vatBreakdowns = r.vatLines.compactMap { line in
+                        guard let amount = line.amount, let base = line.base else { return nil }
+                        let percentage = line.rate.rounded() == line.rate
+                            ? "\(Int(line.rate))%" : "\(line.rate)%"
+                        return VatBreakdown(percentage: percentage, vatAmount: amount, baseAmount: base)
+                    }
+                    if let total = r.total, let vat = totalVat {
+                        // Pentru cote multiple, baza documentului este total minus
+                        // suma tuturor valorilor TVA, nu baza primei cote.
+                        acc.baseAmount = (total - vat).ron2
+                    } else if !vatBases.isEmpty {
+                        acc.baseAmount = vatBases.reduce(0, +).ron2
                     } else {
                         acc.baseAmount = r.total
                     }
