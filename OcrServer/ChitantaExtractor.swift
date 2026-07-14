@@ -191,16 +191,18 @@ enum ChitantaExtractor {
     /// Un document e chitanta (nu bon fiscal) daca are "CHITANTA" si NU are
     /// markerii de casa de marcat.
     static func looksLikeChitanta(_ text: String) -> Bool {
-        let t = text.uppercased()
-            .replacingOccurrences(of: "Ț", with: "T").replacingOccurrences(of: "Ă", with: "A")
+        let t = normalize(text)
         if t.contains("BON FISCAL") || t.contains("TOTAL TVA") || t.contains("CASA DE MARCAT") {
             return false
         }
         let title = t.range(of: "\\bCH[I1L][T7L][A-Z]{3,}\\b", options: .regularExpression) != nil
-        let formEvidence = t.range(of: "(?:SERIE|SERIA|SERIC)\\s*[/\\-]?\\s*(?:NUMAR|NWUAR|NOMAR)",
+        let formEvidence = t.range(of: "(?:SERIE|SERIA|SERIC)\\s*[/\\-]?\\s*(?:NUMAR|NWUAR|NOMAR|TOMNAR)",
                                    options: .regularExpression) != nil
             || (t.contains("PRIMIT DE LA") && t.contains("SUMA"))
-        return title || formEvidence
+        let courierEvidence = t.range(
+            of: "CHITANTA\\s+RAMBURS|RAMBURS\\s+CONT\\s+COLECTOR|SERIA\\s+RAMB",
+            options: .regularExpression) != nil
+        return title || formEvidence || courierEvidence
     }
 
     /// `linesText`   = linii din trecerea CU corectie lingvistica (text de mana)
@@ -219,6 +221,7 @@ enum ChitantaExtractor {
         let issuerLinesT = Array(linesText.prefix(primitIndex(linesText)))
         let issuerLinesD = Array(linesDigits.prefix(primitIndex(linesDigits)))
         let payerLinesD  = Array(linesDigits.dropFirst(primitIndex(linesDigits)))
+        let mine = myCui.map { cui in String(cui.filter { $0.isNumber }) }
 
         func zone(after anchors: [String], in lines: [String], stopBefore: [String] = []) -> String? {
             for (i, line) in lines.enumerated() {
@@ -245,10 +248,10 @@ enum ChitantaExtractor {
             pattern: "REG\\.?\\s*COM|ORD\\.?\\s*REG|CUI|CIF|C\\.?F\\.?|IBAN|CONT|TELEFON|TEL\\.?|FAX|CAPITAL|FACTUR",
             options: [.caseInsensitive])
         let seriesRx = try! NSRegularExpression(
-            pattern: "(?:SERIE|SERIA|SERIC)(?:\\s*[/\\-]\\s*(?:NUMAR|NWUAR|NOMAR))?\\s*[:#.\\-]*\\s*([A-Z]{1,8})(?=\\s|[.\\-/]|\\d|$)",
+            pattern: "(?:SERIE|SERIA|SERIC)(?:\\s*[/\\-]\\s*(?:NUMAR|NWUAR|NOMAR|TOMNAR|ANAR))?\\s*[:#.\\-]*\\s*([A-Z]{1,8})(?=\\s|[.\\-/]|\\d|$)",
             options: [.caseInsensitive])
         let numberRx = try! NSRegularExpression(
-            pattern: "(?:(?:SERIE|SERIA|SERIC)\\s*[/\\-]\\s*(?:NUMAR|NWUAR|NOMAR)|(?:NUMAR|NWUAR|NOMAR)|\\bNR\\.?)\\s*[:#.\\-]*\\s*(?:[A-Z]{1,8}[. ]*)?(\\d{1,16})",
+            pattern: "(?:(?:SERIE|SERIA|SERIC)\\s*[/\\-]\\s*(?:NUMAR|NWUAR|NOMAR|TOMNAR|ANAR)|(?:NUMAR|NWUAR|NOMAR|TOMNAR|ANAR)|\\bNR\\.?)\\s*[:#.\\-]*\\s*(?:[A-Z]{1,8}[. ]*)?(\\d{1,16})",
             options: [.caseInsensitive])
         for line in linesDigits {
             let up = normalize(line)
@@ -262,7 +265,7 @@ enum ChitantaExtractor {
             }
             if r.serie != nil && r.numar != nil { break }
         }
-        r.date = parseDate(linesDigits)
+        r.date = parseDate(linesDigits: linesDigits, linesText: linesText)
 
         // --- EMITENTUL (firma X, care a primit banii) — antetul tiparit
         r.emitentNume = zone(after: ["UNITATEA", "ENTITATEA", "FURNIZOR", "SOCIETATEA"], in: issuerLinesT,
@@ -308,22 +311,35 @@ enum ChitantaExtractor {
 
         // CUI / CNP platitor — DOAR din zona de sub "Am primit de la",
         // ca sa nu-l confundam cu CUI-ul emitentului din antet
+        let payerIdRx = try! NSRegularExpression(
+            pattern: "(?:CUI|CIF|C\\.?F\\.?|C\\.?U\\.?I(?:\\.?/C\\.?N\\.?P\\.?)?|CNP)\\s*[:.]?\\s*(?:[RK][O0Q]\\s*)?([0-9OQDILSZBG]{4,13})|\\b[RK][O0Q]\\s*([0-9OQDILSZBG]{4,10})",
+            options: [.caseInsensitive])
         for line in payerLinesD {
             let up = normalize(line)
-            // etichete uzuale SAU un CUI cu prefix RO fara nicio eticheta
-            // (chitanta DONA: "R043544049 J23/129/2021" imediat sub numele platitorului)
-            let hasLabel = up.contains("CNP") || up.contains("CUI") || up.contains("CIF")
-                || up.contains("C.F")
-            let hasRoCui = up.range(of: "\\bR[O0]\\s?\\d{6,10}\\b",
-                                    options: .regularExpression) != nil
-            guard hasLabel || hasRoCui else { continue }
-            let digits = String(RoCUI.repairOCRDigits(up).filter { $0.isNumber })
+            let range = NSRange(up.startIndex..., in: up)
+            guard let match = payerIdRx.firstMatch(in: up, range: range) else { continue }
+            let group = match.range(at: 1).location != NSNotFound ? 1 : 2
+            var digits = String(RoCUI.repairOCRDigits(
+                (up as NSString).substring(with: match.range(at: group))).filter { $0.isNumber })
             if digits.count >= 13 {
                 let cnp = String(digits.prefix(13))
                 r.platitorCnp = cnp
                 r.platitorCuiValid = RoCNP.isValid(cnp)
                 if !r.platitorCuiValid { warnings.append("CNP-ul platitorului nu trece checksum-ul — verifica manual.") }
             } else if digits.count >= 4 {
+                if !RoCUI.isValid(digits), digits.first == "0", digits.count > 4 {
+                    let withoutPrefix = String(digits.dropFirst())
+                    if RoCUI.isValid(withoutPrefix) { digits = withoutPrefix }
+                }
+                // CUI-ul firmei introdus in interfata este o dovada suplimentara:
+                // acceptam repararea doar la o singura cifra diferita.
+                if !RoCUI.isValid(digits), let mine, mine.count == digits.count {
+                    let distance = zip(mine, digits).filter { pair in pair.0 != pair.1 }.count
+                    if distance == 1, RoCUI.isValid(mine) {
+                        digits = mine
+                        warnings.append("CUI-ul platitorului a fost reparat cu valoarea firmei introdusa in interfata.")
+                    }
+                }
                 r.platitorCui = digits
                 r.platitorCuiValid = RoCUI.isValid(digits)
                 if !r.platitorCuiValid { warnings.append("CUI-ul platitorului nu trece checksum-ul — verifica manual.") }
@@ -331,29 +347,79 @@ enum ChitantaExtractor {
             break
         }
 
-        // --- suma in cifre. Incercam intai trecerea fara corectie, apoi OCR-ul
-        // dedicat scrisului de mana, dar numai in zona explicita "Suma".
+        // --- suma in cifre. Incercam intai citirea exacta, apoi repararea
+        // caracterelor OCR numai in zona explicita "Suma". Pentru caractere
+        // ambigue (de ex. D poate fi 0 sau 4) alegem doar prin acord cu suma in litere.
+        var exactAmountCandidates: [Double] = []
+        var repairedAmountCandidates: [Double] = []
+
+        func digitVariants(_ token: String) -> [String] {
+            let alternatives: [Character: [Character]] = [
+                "O": ["0"], "Q": ["0"], "D": ["0", "4"],
+                "I": ["1"], "L": ["1"], "Z": ["2"], "E": ["3"],
+                "A": ["4"], "H": ["4"], "S": ["5"], "G": ["6"],
+                "T": ["7"], "B": ["8"]
+            ]
+            var values = [""]
+            for ch in token.uppercased() {
+                let opts: [Character]
+                if ch.isNumber { opts = [ch] }
+                else { opts = alternatives[ch] ?? [] }
+                if opts.isEmpty { return [] }
+                values = values.flatMap { prefix in opts.map { prefix + String($0) } }
+                if values.count > 32 { values = Array(values.prefix(32)) }
+            }
+            return values
+        }
+
+        let fuzzyAmountRx = try! NSRegularExpression(
+            pattern: "(?<![A-Z0-9])([0-9OQDILZSEAGTBH]{1,5})\\s*(?:[.,+:]|\\s)\\s*([0-9OQDILZSEAGTBH]{2})(?![A-Z0-9])",
+            options: [.caseInsensitive])
         for line in linesDigits + linesText {
             let up = normalize(line)
             // Tolereaza confuzii OCR uzuale: SUMA, SUMĂ, SUMK, SUMKI, SUMAI.
             guard up.range(of: "\\bSUM(?:A|Ă|K|KI|AI)\\b", options: .regularExpression) != nil else { continue }
-            if let v = FinExtract.amounts(in: line).first { r.sumaCifre = v; break }
-            // "suma de 387 46 RON" — spatiu in loc de separator zecimal (FAN Courier)
-            if let m = up.range(of: "\\b(\\d{1,5}) (\\d{2})\\b", options: .regularExpression) {
-                let parts = up[m].split(separator: " ")
-                if parts.count == 2, let a = Double(parts[0]), let b = Double(parts[1]) {
-                    r.sumaCifre = (a + b / 100).ron2; break
+            exactAmountCandidates.append(contentsOf: FinExtract.amounts(in: line))
+            let range = NSRange(up.startIndex..., in: up)
+            for match in fuzzyAmountRx.matches(in: up, range: range) {
+                let ns = up as NSString
+                let wholes = digitVariants(ns.substring(with: match.range(at: 1)))
+                let cents = digitVariants(ns.substring(with: match.range(at: 2)))
+                for whole in wholes {
+                    for cent in cents {
+                        if let value = Double("\(whole).\(cent)"), value > 0 {
+                            repairedAmountCandidates.append(value.ron2)
+                        }
+                    }
                 }
             }
         }
-        // Fara fallback "cea mai mare suma": telefonul, capitalul social sau
-        // un sold bancar nu trebuie sa devina valoarea chitantei.
+        exactAmountCandidates = Array(Set(exactAmountCandidates)).sorted()
+        repairedAmountCandidates = Array(Set(repairedAmountCandidates)).sorted()
 
         // --- suma in litere: zona "adica ..." (cu corectie + customWords)
         if let lit = zone(after: ["ADICA"], in: linesText, stopBefore: ["REPREZENTAND", "REPREZENT"]) {
             r.sumaLitereText = lit
             r.sumaLitere = RoNumberWords.parse(lit)
         }
+
+        if let exact = exactAmountCandidates.first {
+            r.sumaCifre = exact
+        } else if repairedAmountCandidates.count == 1 {
+            r.sumaCifre = repairedAmountCandidates[0]
+            warnings.append("Separatorul sau unele cifre ale sumei au fost reparate din OCR in zona 'Suma'.")
+        } else if let wordsAmount = r.sumaLitere,
+                  let best = repairedAmountCandidates.min(by: {
+                      abs($0 - wordsAmount) < abs($1 - wordsAmount)
+                  }), abs(best - wordsAmount) <= 1.0 {
+            r.sumaCifre = best
+            warnings.append("Cifre OCR ambigue, rezolvate prin acord cu suma scrisa in litere.")
+        } else if !repairedAmountCandidates.isEmpty {
+            warnings.append("Suma in cifre are caractere OCR ambigue si nu a fost ghicita automat.")
+        }
+
+        // Fara fallback "cea mai mare suma": telefonul, capitalul social sau
+        // un sold bancar nu trebuie sa devina valoarea chitantei.
 
         // --- dubla validare cifre vs litere (echivalentul checksum-ului, pentru bani)
         switch (r.sumaCifre, r.sumaLitere) {
@@ -390,7 +456,6 @@ enum ChitantaExtractor {
         }
 
         // --- directia: cine e firma ta pe chitanta asta?
-        let mine = myCui.map { String($0.filter { c in c.isNumber }) }
         if let mine, !mine.isEmpty {
             if mine == r.emitentCui { r.directie = "incasare" }
             else if mine == r.platitorCui { r.directie = "plata" }
@@ -440,22 +505,67 @@ enum ChitantaExtractor {
     }
 
     private static func normalize(_ s: String) -> String {
-        let map: [Character: Character] = ["Ă": "A", "Â": "A", "Î": "I", "Ș": "S", "Ş": "S",
+        let map: [Character: Character] = ["Ă": "A", "Â": "A", "À": "A", "Á": "A",
+                                            "Î": "I", "Ș": "S", "Ş": "S",
                                             "Ț": "T", "Ţ": "T"]
         return String(s.uppercased().map { map[$0] ?? $0 })
     }
 
-    private static func parseDate(_ lines: [String]) -> String? {
-        let rx = try! NSRegularExpression(pattern: "\\b(\\d{1,2})[./-](\\d{1,2})[./-](20\\d{2})\\b")
-        for line in lines {
-            let r = NSRange(line.startIndex..., in: line)
-            guard let m = rx.firstMatch(in: line, range: r) else { continue }
-            let ns = line as NSString
-            let d = Int(ns.substring(with: m.range(at: 1))) ?? 0
-            let mo = Int(ns.substring(with: m.range(at: 2))) ?? 0
-            let y = Int(ns.substring(with: m.range(at: 3))) ?? 0
-            guard (1...31).contains(d), (1...12).contains(mo) else { continue }
+    private static func parseDate(linesDigits: [String], linesText: [String]) -> String? {
+        let noise = try! NSRegularExpression(
+            pattern: "FACTURA|FACT\\.|REPREZENT", options: [.caseInsensitive])
+        let dateLike = try! NSRegularExpression(
+            pattern: "([0-9OQDILZSBGFH]{1,2})\\s*(?:[./-]|\\s+)\\s*([0-9OQDILZSBGFH]{1,2})\\s*(?:[./-]|\\s+)\\s*(2[0-9OQDILZSBGFH\\s]{3,6})",
+            options: [.caseInsensitive])
+        let isoLike = try! NSRegularExpression(
+            pattern: "(20\\d{2})[./-](\\d{1,2})[./-](\\d{1,2})")
+
+        func repairedNumber(_ token: String) -> Int? {
+            let map: [Character: Character] = [
+                "O": "0", "Q": "0", "D": "0", "I": "1", "L": "1",
+                "Z": "2", "E": "3", "A": "4", "H": "4", "S": "5",
+                "F": "5", "G": "6", "T": "7", "B": "8"
+            ]
+            let chars = token.uppercased().compactMap { ch -> Character? in
+                if ch.isNumber { return ch }
+                return map[ch]
+            }
+            return Int(String(chars))
+        }
+
+        func value(from line: String) -> String? {
+            let upper = normalize(line)
+            let range = NSRange(upper.startIndex..., in: upper)
+            let ns = upper as NSString
+            var day: Int?, month: Int?, year: Int?
+            if let m = isoLike.firstMatch(in: upper, range: range) {
+                year = Int(ns.substring(with: m.range(at: 1)))
+                month = Int(ns.substring(with: m.range(at: 2)))
+                day = Int(ns.substring(with: m.range(at: 3)))
+            } else if let m = dateLike.firstMatch(in: upper, range: range) {
+                day = repairedNumber(ns.substring(with: m.range(at: 1)))
+                month = repairedNumber(ns.substring(with: m.range(at: 2)))
+                year = repairedNumber(ns.substring(with: m.range(at: 3)))
+            }
+            guard let d = day, let mo = month, let y = year,
+                  (1...31).contains(d), (1...12).contains(mo),
+                  (2000...2099).contains(y) else { return nil }
+            var comps = DateComponents(); comps.year = y; comps.month = mo; comps.day = d
+            guard let date = Calendar(identifier: .gregorian).date(from: comps),
+                  Calendar(identifier: .gregorian).component(.day, from: date) == d else { return nil }
             return String(format: "%04d-%02d-%02d", y, mo, d)
+        }
+
+        let all = linesText + linesDigits
+        let clean = all.filter { line in
+            noise.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)) == nil
+        }
+        let preferred = clean.filter {
+            let t = normalize($0)
+            return t.contains("DATA") || t.contains("TIPARIT LA")
+        } + clean
+        for line in preferred {
+            if let parsed = value(from: line) { return parsed }
         }
         return nil
     }

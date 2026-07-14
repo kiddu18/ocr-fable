@@ -212,7 +212,7 @@ enum FinExtract {
     /// O suma are OBLIGATORIU formatul \d{1,5}[.,]\d{2}. Un numar fara separator
     /// zecimal (4000884157, 30630040) nu e niciodata un total.
     static let amountRegex = try! NSRegularExpression(
-        pattern: "(?<![\\d%])(\\d{1,5})\\s?[.,]\\s?(\\d{2})(?!\\d)(?!\\s*%)")
+        pattern: "(?<![\\p{L}\\d%])(\\d{1,5})\\s?[.,]\\s?(\\d{2})(?![\\p{L}\\d])(?!\\s*%)")
 
     static func amounts(in line: String) -> [Double] {
         let range = NSRange(line.startIndex..., in: line)
@@ -295,7 +295,12 @@ enum ReceiptExtractor {
 
         // --- sume
         let allAmounts = lines.flatMap { FinExtract.amounts(in: $0) }
-        let totalOCR = totalAmount(lines)
+        let directTotal = totalAmount(lines)
+        let articlesTotal = directTotal == nil ? itemizedTotal(lines) : nil
+        let totalOCR = directTotal ?? articlesTotal
+        if articlesTotal != nil {
+            warnings.append("Totalul a fost reconstruit din randurile articolelor deoarece valoarea de langa TOTAL nu a fost citita.")
+        }
         let vat = vatInfo(lines, docDate: docDate)
         warnings.append(contentsOf: vat.warnings)
         let mainRate = vat.rates.first ?? RoVAT.validRates(documentDate: docDate).first ?? 21
@@ -335,6 +340,7 @@ enum ReceiptExtractor {
             let base = (r.total != nil && amt != nil) ? (r.total! - amt!).ron2 : nil
             r.vatLines = [VatLineDTO(rate: mainRate, amount: amt, base: base)]
         }
+        if articlesTotal != nil, r.total != nil { r.totalSource = "derivat_din_articole" }
 
         // --- carburant: litri x pret unitar, cross-check cu totalul
         let f = fuel(lines)
@@ -476,6 +482,37 @@ enum ReceiptExtractor {
             }
         }
         return nil
+    }
+
+    /// Fallback universal pentru bonuri la care Vision citeste eticheta TOTAL,
+    /// dar pierde valoarea: adunam doar randurile finale de articol marcate cu
+    /// grupa fiscala A-E si scadem reducerile. Randurile "1 BUC x pret" nu au
+    /// grupa la final si nu sunt numarate de doua ori.
+    private static func itemizedTotal(_ lines: [String]) -> Double? {
+        let full = lines.joined(separator: " ").uppercased()
+        guard full.range(of: "\\bTOTAL\\b|SUBTOTAL", options: .regularExpression) != nil else {
+            return nil
+        }
+        let fiscalRow = try! NSRegularExpression(
+            pattern: "(?:^|\\s|-)\\b[A-E]\\b\\s*$", options: [.caseInsensitive])
+        let excluded = try! NSRegularExpression(
+            pattern: "TOTAL|SUBTOTAL|TVA|CARD|CASH|NUMERAR|REST|RULAJ",
+            options: [.caseInsensitive])
+        var values: [Double] = []
+        for line in lines {
+            let range = NSRange(line.startIndex..., in: line)
+            guard fiscalRow.firstMatch(in: line, range: range) != nil,
+                  excluded.firstMatch(in: line, range: range) == nil,
+                  let value = FinExtract.amounts(in: line).last else { continue }
+            let upper = line.uppercased()
+            let negative = upper.range(
+                of: "DISCOUNT|REDUCERE|RABAT|\\d[.,]\\d{2}\\s*-\\s*[A-E]\\s*$",
+                options: .regularExpression) != nil
+            values.append(negative ? -value : value)
+        }
+        guard !values.isEmpty else { return nil }
+        let total = values.reduce(0, +).ron2
+        return total > 0 ? total : nil
     }
 
     private static func vatInfo(_ lines: [String], docDate: Date?)

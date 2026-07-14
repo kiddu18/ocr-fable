@@ -123,6 +123,19 @@ enum AnafResolver {
                         ocrHeader: String, anaf: [String: AnafCompany])
         -> (cui: String?, company: AnafCompany?, score: Double, status: String) {
 
+        // Daca OCR-ul a stricat o cifra, dar dintre toate variantele care trec
+        // checksum-ul ANAF confirma o singura firma, rezultatul este neambiguu
+        // chiar daca antetul firmei nu a fost citit (caz frecvent pe bonuri inguste).
+        let found = candidates.compactMap { cui -> (String, AnafCompany)? in
+            anaf[cui].map { (cui, $0) }
+        }
+        if !checksumWasValid, found.count == 1 {
+            let (cui, company) = found[0]
+            let score = AnafClient.nameMatchScore(
+                anafName: company.denumire ?? "", ocrHeader: ocrHeader)
+            return (cui, company, score, "confirmat_anaf_reparat")
+        }
+
         var best: (String, AnafCompany, Double)? = nil
         for c in candidates {
             guard let comp = anaf[c] else { continue }

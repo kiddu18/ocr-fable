@@ -82,7 +82,7 @@ const ctx = /(?:COD\s*FISCAL|COD\s*IDENTIFICARE\s*FISCALA|\bC\.?\s*I\.?\s*F\b|\b
 const excl = /CLIENT|CNP|CUMPARATOR|BENEF/i;
 const strong = /NUMAR\s*BON|COD\s*FISCAL|COD\s*IDENTIFICARE\s*FISCALA|\bR[O0]\s?\d{6,10}\b/i;
 const anchor = /NUMAR\s*BON|COD\s*FISCAL|COD\s*IDENTIFICARE\s*FISCALA|\bC\.?\s*I\.?\s*F\b|\bCUI\b|\bR[O0]\s?\d{6,10}\b|\b(?:S\.?\s?R\.?\s?L\.?|S\.?A\.?|P\.?F\.?A\.?)\b/i;
-const chitantaTitle = /\bCH[I1L][T7L][A-ZĂÂÎȘȚ]{3,}\b|(?:SERIE|SERIA|SERIC)\s*[\/-]?\s*(?:NUMAR|NWUAR|NOMAR)/i;
+const chitantaTitle = /\bCH[I1L][T7L][A-ZĂÂÎȘȚ]{3,}\b|(?:SERIE|SERIA|SERIC)\s*[\/-]?\s*(?:NUMAR|NWUAR|NOMAR|TOMNAR|ANAR)/i;
 
 function looksLikeSingleChitanta(words) {
   const text = groupLines(words).join(' ').toUpperCase();
@@ -119,6 +119,19 @@ function mergeFragments(parts, mh) {
       const minW = Math.min(a.maxX - a.minX, b.maxX - b.minX);
       const overlap = inter > 0 && minW > 0 ? inter / minW : 0;
       const vGap = Math.max(b.minY - a.maxY, a.minY - b.maxY, 0);
+      const ta = groupLines(merged[i]).join(' ').toUpperCase();
+      const tb = groupLines(merged[j]).join(' ').toUpperCase();
+      const aTitle = chitantaTitle.test(ta), bTitle = chitantaTitle.test(tb);
+      const aBody = ta.includes('PRIMIT DE LA') && ta.includes('SUMA');
+      const bBody = tb.includes('PRIMIT DE LA') && tb.includes('SUMA');
+      const hasBon = /BON\s+FISCAL|TOTAL\s*TVA|CASA\s+DE\s+MARCAT/i.test(`${ta} ${tb}`);
+      const yInter = Math.min(a.maxY, b.maxY) - Math.max(a.minY, b.minY);
+      const minH = Math.min(a.maxY - a.minY, b.maxY - b.minY);
+      const yOverlap = yInter > 0 && minH > 0 ? yInter / minH : 0;
+      const hGap = Math.max(b.minX - a.maxX, a.minX - b.maxX, 0);
+      if (!hasBon && ((aTitle && bBody) || (bTitle && aBody)) && yOverlap > .25 && hGap < mh * 45) {
+        merged[i].push(...merged[j]); merged.splice(j, 1); changed = true; break outer;
+      }
       if (looksLikeReceipt(merged[i]) && looksLikeReceipt(merged[j])) continue;
       const ca = merchantCuis(merged[i]), cb = merchantCuis(merged[j]);
       if (ca.size && cb.size && [...ca].every(x => !cb.has(x))) continue;
@@ -171,7 +184,7 @@ function enforceOneHeader(cluster,mh,depth=0){const isChitanta=looksLikeSingleCh
 
 function absorbOrphans(clusters,mh){const anchored=clusters.filter(hasFiscalHeader),orphans=clusters.filter(c=>!hasFiscalHeader(c));if(!anchored.length)return clusters;for(const o of orphans){const ob=bbox(o);let bi=-1,bk=[Infinity,Infinity];anchored.forEach((a,i)=>{const ab=bbox(a),inter=Math.min(ob.maxX,ab.maxX)-Math.max(ob.minX,ab.minX),minw=Math.min(ob.maxX-ob.minX,ab.maxX-ab.minX),xo=inter>0&&minw>0?inter/minw:0,vg=Math.max(ab.minY-ob.maxY,ob.minY-ab.maxY,0),hg=Math.max(ab.minX-ob.maxX,ob.minX-ab.maxX,0),key=[xo>.3?0:1,xo>.3?vg:Math.hypot(vg,hg)];if(key[0]<bk[0]||(key[0]===bk[0]&&key[1]<bk[1])){bk=key;bi=i;}});if(bi>=0&&bk[1]<=mh*20)anchored[bi].push(...o);}return anchored;}
 
-function segment(words){const mh=medianHeight(words),parts=[];xycut(words,mh,mh*1.5,parts);let m=mergeFragments(parts.filter(p=>p.length>=8),mh).flatMap(p=>splitByAnchors(p,mh)).flatMap(p=>enforceOneHeader(p,mh));m=absorbOrphans(m,mh);return m.filter(p=>p.length>=12).sort((a,b)=>Math.floor(bbox(a).minX/400)-Math.floor(bbox(b).minX/400)||bbox(a).minY-bbox(b).minY);}
+function segment(words){const mh=medianHeight(words),parts=[];xycut(words,mh,mh*1.5,parts);let m=mergeFragments(parts.filter(p=>p.length>=8||chitantaTitle.test(groupLines(p).join(' '))),mh).flatMap(p=>splitByAnchors(p,mh)).flatMap(p=>enforceOneHeader(p,mh));m=absorbOrphans(m,mh);return m.filter(p=>p.length>=12).sort((a,b)=>Math.floor(bbox(a).minX/400)-Math.floor(bbox(b).minX/400)||bbox(a).minY-bbox(b).minY);}
 
 function describe(clusters){console.log(`clusters=${clusters.length}`);clusters.forEach((c,i)=>{const b=bbox(c),text=groupLines(c).join(' | '),names=[...new Set((text.match(/MAGISTRAL|MOL|DOUGLAS|TURIST|ROG|DAISY|AMERIS|DONA|FAN/ig)||[]).map(x=>x.toUpperCase()))];console.log(`${i}: n=${c.length} x=${b.minX.toFixed(0)}-${b.maxX.toFixed(0)} y=${b.minY.toFixed(0)}-${b.maxY.toFixed(0)} names=${names.join(',')} cuis=${[...merchantCuis(c)].join(',')}`);});}
 

@@ -391,9 +391,32 @@ actor VaporServer {
                 // selectorul din pagina: "auto" | "bon" | "chitanta" (doc_type = clientul nou, processing_mode = cel vechi)
                 let mode = (upload.doc_type ?? upload.processing_mode ?? "auto").lowercased()
                 
-                for det in detections {
+                var refinedCandidates: [ReceiptDetection] = []
+                for (detIndex, det) in detections.enumerated() {
                     let rotImg = rotatedImage(det.turns)
-                    let firstClean = await pro.cropAndReOCR(rotatedImage: rotImg, clusterBoxes: det.words)
+
+                    // Daca pe acelasi rand nu exista alt document, extindem doar
+                    // ORIZONTAL crop-ul. Astfel recuperam blocurile laterale
+                    // Serie/Numar/Data ale formularelor, fara a lipi documentele
+                    // Ameris si FAN care sunt realmente unul langa altul.
+                    let a = det.baseRect
+                    let hasHorizontalNeighbor = detections.enumerated().contains { pair in
+                        let (otherIndex, other) = pair
+                        guard otherIndex != detIndex else { return false }
+                        let b = other.baseRect
+                        let yInter = min(a.maxY, b.maxY) - max(a.minY, b.minY)
+                        let minH = min(a.height, b.height)
+                        let yOverlap = (yInter > 0 && minH > 0) ? yInter / minH : 0
+                        let xInter = min(a.maxX, b.maxX) - max(a.minX, b.minX)
+                        let minW = min(a.width, b.width)
+                        let xOverlap = (xInter > 0 && minW > 0) ? xInter / minW : 0
+                        let hGap = max(b.minX - a.maxX, a.minX - b.maxX, 0)
+                        return yOverlap > 0.25 && xOverlap < 0.20
+                            && hGap < max(a.width, b.width) * 0.80
+                    }
+                    let firstClean = await pro.cropAndReOCR(
+                        rotatedImage: rotImg, clusterBoxes: det.words,
+                        expandHorizontally: !hasHorizontalNeighbor)
 
                     // A doua segmentare este esentiala: prima trecere poate vedea
                     // o banda cu 2-3 documente, iar re-OCR-ul curat dezvaluie abia
@@ -405,18 +428,42 @@ actor VaporServer {
                     }
 
                     for subcluster in subclusters {
-                    let clean: [OCRBoxItem]
-                    if subclusters.count > 1 {
-                        clean = await pro.cropAndReOCR(rotatedImage: rotImg, clusterBoxes: subcluster)
-                    } else {
-                        clean = firstClean
+                        let clean: [OCRBoxItem]
+                        if subclusters.count > 1 {
+                            clean = await pro.cropAndReOCR(
+                                rotatedImage: rotImg, clusterBoxes: subcluster)
+                        } else {
+                            clean = firstClean
+                        }
+                        let bb = TextRecognizerPro.bbox(clean)
+                        let rotRect = CGRect(x: bb.minX, y: bb.minY,
+                                             width: bb.maxX - bb.minX,
+                                             height: bb.maxY - bb.minY)
+                        let baseRect = TextRecognizerPro.mapRectToBase(
+                            rotRect, turns: det.turns,
+                            rotatedW: rotImg.width, rotatedH: rotImg.height)
+                        refinedCandidates.append(ReceiptDetection(
+                            turns: det.turns, words: clean, baseRect: baseRect,
+                            score: TextRecognizerPro.documentQuality(clean)))
                     }
+                }
+
+                // Deduplicarea initiala nu poate compara corect o banda lata cu
+                // documentele obtinute abia dupa re-OCR. O repetam pe dreptunghiurile
+                // finale: aceasta elimina randurile dublate fara sa reduca 6 bonuri la 2.
+                let finalDetections = TextRecognizerPro.deduplicate(refinedCandidates)
+                    .sorted { a, b in
+                        let rowA = Int((a.baseRect.minY / 300).rounded(.down))
+                        let rowB = Int((b.baseRect.minY / 300).rounded(.down))
+                        return rowA != rowB ? rowA < rowB : a.baseRect.minX < b.baseRect.minX
+                    }
+                print("Documente finale dupa rafinare si deduplicare: \(finalDetections.count)")
+
+                for det in finalDetections {
+                    let rotImg = rotatedImage(det.turns)
+                    let clean = det.words
                     let rawLines = ReceiptSegmenterV2.groupLines(clean)
-                    let bb = TextRecognizerPro.bbox(clean)
-                    let rotRect = CGRect(x: bb.minX, y: bb.minY,
-                                         width: bb.maxX - bb.minX, height: bb.maxY - bb.minY)
-                    let baseRect = TextRecognizerPro.mapRectToBase(
-                        rotRect, turns: det.turns, rotatedW: rotImg.width, rotatedH: rotImg.height)
+                    let baseRect = det.baseRect
 
                     debugClusters.append([
                         "page": pageIndex,
@@ -427,7 +474,7 @@ actor VaporServer {
                             ["t": w.text, "x": w.x, "y": w.y, "w": w.w, "h": w.h]
                         }
                     ])
-                    
+
                     let autoIsChitanta = ChitantaExtractor.looksLikeChitanta(rawLines.joined(separator: "\n"))
                     let treatAsChitanta: Bool
                     switch mode {
@@ -455,8 +502,7 @@ actor VaporServer {
                     // Debug overlay-ul contine fiecare document o singura data.
                     allBoxesOut.append(contentsOf: TextRecognizerPro.mapWordsToBase(
                         clean, turns: det.turns, rotatedW: rotImg.width, rotatedH: rotImg.height))
-                    } // end for subcluster
-                }
+                } // end for finalDetections
                 } // end for base in pageImages
 
                 // /debug_clusters pastreaza toate paginile, nu doar ultima pagina PDF.

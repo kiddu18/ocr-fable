@@ -27,7 +27,7 @@ import Foundation
 enum ReceiptSegmenterV2 {
 
     private static let chitantaTitleRx = try! NSRegularExpression(
-        pattern: "\\bCH[I1L][T7L][A-ZĂÂÎȘȚ]{3,}\\b|(?:SERIE|SERIA|SERIC)\\s*[/\\-]?\\s*(?:NUMAR|NWUAR|NOMAR)",
+        pattern: "\\bCH[I1L][T7L][A-ZĂÂÎȘȚ]{3,}\\b|(?:SERIE|SERIA|SERIC)\\s*[/\\-]?\\s*(?:NUMAR|NWUAR|NOMAR|TOMNAR|ANAR)",
         options: [.caseInsensitive])
 
     private static func looksLikeSingleChitanta(_ cluster: [OCRBoxItem]) -> Bool {
@@ -48,7 +48,14 @@ enum ReceiptSegmenterV2 {
 
         var parts: [[OCRBoxItem]] = []
         xycut(words, minGapX: mh * 1.0, minGapY: mh * 1.5, into: &parts)
-        parts = parts.filter { $0.count >= 8 }
+        // Un bloc lateral "CHITANTA / Serie / Numar / Data" poate avea doar
+        // 4-7 cuvinte; il pastram pentru reunirea semantica de mai jos.
+        parts = parts.filter { part in
+            if part.count >= 8 { return true }
+            let text = groupLines(part).joined(separator: " ")
+            return chitantaTitleRx.firstMatch(
+                in: text, range: NSRange(text.startIndex..., in: text)) != nil
+        }
 
         var merged = mergeFragments(parts, medianHeight: mh)
         merged = merged.flatMap { splitByAnchors($0, medianHeight: mh) }
@@ -119,6 +126,34 @@ enum ReceiptSegmenterV2 {
                     let minW = min(a.maxX - a.minX, b.maxX - b.minX)
                     let xOverlap = (inter > 0 && minW > 0) ? inter / minW : 0
                     let vGap = max(b.minY - a.maxY, a.minY - b.maxY, 0)
+
+                    // Formularele tipizate au frecvent corpul in stanga si blocul
+                    // "CHITANTA / Serie / Numar / Data" in dreapta. XY-cut le
+                    // separa, desi sunt acelasi document. Le reunim numai cand
+                    // fragmentele sunt complementare: unul are titlul, celalalt
+                    // are simultan "primit de la" si "suma", iar niciunul nu este bon.
+                    let ta = groupLines(merged[i]).joined(separator: " ").uppercased()
+                    let tb = groupLines(merged[j]).joined(separator: " ").uppercased()
+                    let ra = NSRange(ta.startIndex..., in: ta)
+                    let rb = NSRange(tb.startIndex..., in: tb)
+                    let aTitle = chitantaTitleRx.firstMatch(in: ta, range: ra) != nil
+                    let bTitle = chitantaTitleRx.firstMatch(in: tb, range: rb) != nil
+                    let aBody = ta.contains("PRIMIT DE LA") && ta.contains("SUMA")
+                    let bBody = tb.contains("PRIMIT DE LA") && tb.contains("SUMA")
+                    let hasBon = (ta + " " + tb).range(
+                        of: "BON\\s+FISCAL|TOTAL\\s*TVA|CASA\\s+DE\\s+MARCAT",
+                        options: .regularExpression) != nil
+                    let yInter = min(a.maxY, b.maxY) - max(a.minY, b.minY)
+                    let minH = min(a.maxY - a.minY, b.maxY - b.minY)
+                    let yOverlap = (yInter > 0 && minH > 0) ? yInter / minH : 0
+                    let hGap = max(b.minX - a.maxX, a.minX - b.maxX, 0)
+                    if !hasBon && ((aTitle && bBody) || (bTitle && aBody)),
+                       yOverlap > 0.25, hGap < mh * 45 {
+                        merged[i].append(contentsOf: merged[j])
+                        merged.remove(at: j)
+                        changed = true
+                        break outer
+                    }
 
                     // Regula 1: doua clustere care ambele arata a bon complet nu se unesc.
                     if looksLikeReceipt(merged[i]) && looksLikeReceipt(merged[j]) { continue }

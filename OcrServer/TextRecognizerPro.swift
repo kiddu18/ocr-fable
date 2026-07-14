@@ -77,7 +77,7 @@ final class TextRecognizerPro {
                 let rectRot = CGRect(x: bb.minX, y: bb.minY,
                                      width: bb.maxX - bb.minX, height: bb.maxY - bb.minY)
                 let rectBase = Self.mapRectToBase(rectRot, turns: t, rotatedW: W, rotatedH: H)
-                let score = seg.reduce(0.0) { $0 + Double($1.text.count) }
+                let score = Self.documentQuality(seg)
                 candidates.append(ReceiptDetection(turns: t, words: seg,
                                                    baseRect: rectBase, score: score))
             }
@@ -85,11 +85,7 @@ final class TextRecognizerPro {
 
         // 3. Dedup: pe aceeasi zona a pozei castiga orientarea cu scorul maxim.
         //    (Textul citit in orientarea gresita produce putine cuvinte => pierde.)
-        var accepted: [ReceiptDetection] = []
-        for c in candidates.sorted(by: { $0.score > $1.score }) {
-            let overlaps = accepted.contains { Self.iou($0.baseRect, c.baseRect) > 0.30 }
-            if !overlaps { accepted.append(c) }
-        }
+        var accepted = Self.deduplicate(candidates)
 
         // 3b. Plasa de siguranta #2: zero detectii dupa segmentare + dedup =>
         //     tratam TOATA poza ca un singur document, in orientarea care produce
@@ -191,7 +187,8 @@ final class TextRecognizerPro {
 
     func cropAndReOCR(rotatedImage: CGImage,
                       clusterBoxes: [OCRBoxItem],
-                      marginRatio: Double = 0.03) async -> [OCRBoxItem] {
+                      marginRatio: Double = 0.03,
+                      expandHorizontally: Bool = false) async -> [OCRBoxItem] {
         guard !clusterBoxes.isEmpty else { return [] }
         let minX = clusterBoxes.map { $0.x }.min()!
         let minY = clusterBoxes.map { $0.y }.min()!
@@ -199,9 +196,12 @@ final class TextRecognizerPro {
         let maxY = clusterBoxes.map { $0.y + $0.h }.max()!
         let mX = (maxX - minX) * marginRatio
         let mY = (maxY - minY) * marginRatio
-        let cropRect = CGRect(x: max(0, minX - mX),
+        let cropX = expandHorizontally ? 0 : max(0, minX - mX)
+        let cropMaxX = expandHorizontally ? Double(rotatedImage.width)
+                                          : min(Double(rotatedImage.width), maxX + mX)
+        let cropRect = CGRect(x: cropX,
                               y: max(0, minY - mY),
-                              width: min(Double(rotatedImage.width), maxX + mX) - max(0, minX - mX),
+                              width: cropMaxX - cropX,
                               height: min(Double(rotatedImage.height), maxY + mY) - max(0, minY - mY))
         guard let crop = rotatedImage.cropping(to: cropRect) else { return clusterBoxes }
 
@@ -304,5 +304,51 @@ final class TextRecognizerPro {
         let ia = Double(inter.width * inter.height)
         let ua = Double(a.width * a.height) + Double(b.width * b.height) - ia
         return ua > 0 ? ia / ua : 0
+    }
+
+    /// Scor semantic: prefera documentul complet, nu fragmentul care are doar
+    /// multe caractere (de exemplu antet fara suma sau corp fara serie/data).
+    static func documentQuality(_ words: [OCRBoxItem]) -> Double {
+        let text = words.map { $0.text }.joined(separator: " ").uppercased()
+        var score = words.reduce(0.0) { $0 + Double($1.text.count) }
+        if text.range(of: "BON\\s+FISCAL|CH[I1L][T7L][A-ZĂÂÎȘȚ]{3,}",
+                      options: .regularExpression) != nil { score += 350 }
+        if text.range(of: "CUI|C\\.?I\\.?F|COD\\s+FISCAL", options: .regularExpression) != nil {
+            score += 180
+        }
+        if text.range(of: "\\bTOTAL\\b|SUM[AĂK](?:I)?\\s+DE", options: .regularExpression) != nil {
+            score += 260
+        }
+        if text.range(of: "\\b\\d{1,2}[./-]\\d{1,2}[./-]20\\d{2}\\b",
+                      options: .regularExpression) != nil { score += 120 }
+        return score
+    }
+
+    /// Aceeasi zona fizica poate veni din doua orientari sau dintr-o zona mare
+    /// rafinata ulterior. Combinam IoU cu acoperirea dreptunghiului mai mic si
+    /// limitam raportul ariilor, ca un rand cu 3 bonuri sa nu elimine un bon.
+    static func samePhysicalDocument(_ a: CGRect, _ b: CGRect) -> Bool {
+        let intersection = a.intersection(b)
+        guard !intersection.isNull, intersection.width > 0, intersection.height > 0 else {
+            return false
+        }
+        let aa = a.width * a.height, ab = b.width * b.height
+        guard aa > 0, ab > 0 else { return false }
+        let ia = intersection.width * intersection.height
+        let coverage = ia / min(aa, ab)
+        let areaRatio = max(aa, ab) / min(aa, ab)
+        return iou(a, b) > 0.35 || (coverage > 0.72 && areaRatio < 1.90)
+    }
+
+    static func deduplicate(_ candidates: [ReceiptDetection]) -> [ReceiptDetection] {
+        var accepted: [ReceiptDetection] = []
+        for candidate in candidates.sorted(by: { $0.score > $1.score }) {
+            if !accepted.contains(where: {
+                samePhysicalDocument($0.baseRect, candidate.baseRect)
+            }) {
+                accepted.append(candidate)
+            }
+        }
+        return accepted
     }
 }
