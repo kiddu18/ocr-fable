@@ -26,10 +26,39 @@ assert.equal(Math.round(itemTotal * 100) / 100, 613.10,
   'totalul lipsa poate fi reconstruit din articole fara a dubla pretul unitar');
 
 const chitante = JSON.parse(fs.readFileSync(path.join(__dirname, 'cases', 'chitante.txt'), 'utf8'));
-assert.equal(segment(chitante.slice(0, 249)).length, 3,
+let pageBreak = 1, largestReset = -Infinity;
+for (let i = 1; i < chitante.length; i++) {
+  const reset = chitante[i - 1].y - chitante[i].y;
+  if (reset > largestReset) { largestReset = reset; pageBreak = i; }
+}
+const page1Clusters = segment(chitante.slice(0, pageBreak));
+assert.equal(page1Clusters.length, 3,
   'prima pagina PDF trebuie sa contina 3 documente');
-assert.equal(segment(chitante.slice(249)).length, 3,
+assert.equal(segment(chitante.slice(pageBreak)).length, 3,
   'a doua pagina PDF trebuie sa contina Ameris, FAN si DONA');
+const page2Clusters = segment(chitante.slice(pageBreak));
+const ameris = page2Clusters.find(c => groupLines(c).join(' ').toUpperCase().includes('AMERIS'));
+assert.ok(ameris, 'bonul fiscal de pe pagina a doua trebuie pastrat complet');
+const amerisVat = groupLines(ameris).flatMap(line => {
+  const m = line.match(/SUMA\s+TVA\s+[A-E]\s+(\d{1,2})%.*?(\d{1,5})[,.](\d{2})/i);
+  return m ? [{ rate: Number(m[1]), amount: Number(`${m[2]}.${m[3]}`) }] : [];
+});
+assert.deepEqual(amerisVat, [{ rate: 21, amount: 7.01 }, { rate: 11, amount: 37.66 }],
+  'cotele multiple si sumele lor trebuie pastrate pe acelasi document');
+assert.equal(Math.round(amerisVat.reduce((s, x) => s + x.amount, 0) * 100) / 100, 44.67,
+  'TVA-ul documentului cu cote multiple trebuie agregat');
+const printedDaisyText = groupLines(page1Clusters.find(c =>
+  groupLines(c).join(' ').includes('14332'))).join(' ');
+assert.match(printedDaisyText, /SERIE\s+DSF\s+NUMAR\s+14332/i,
+  'seria DSF nu trebuie inlocuita de cuvantul generic SERIA');
+const donaText = groupLines(page2Clusters.find(c =>
+  groupLines(c).join(' ').toUpperCase().includes('DONA'))).join(' ');
+assert.match(donaText, /SERIE\s*\/\s*NHONAR:\s*DI[., ]+200861/i,
+  'seria si numarul DONA trebuie pastrate din antetul OCR');
+const fanText = groupLines(page2Clusters.find(c =>
+  groupLines(c).join(' ').toUpperCase().includes('FAN COURIER'))).join(' ');
+assert.match(fanText, /SUMA\s+DE\s+387\s*[., ]\s*46/i,
+  'suma FAN trebuie sa ramana in documentul FAN');
 
 const chitantaWords = [
   { text: 'CHITANTA', x: 10, y: 10, w: 100, h: 20 },
@@ -47,7 +76,7 @@ assert.equal('COTA TVA 21,00%'.match(money), null,
 assert.equal('Suma de 6d7,00'.match(money), null,
   'o coada numerica dintr-un token OCR corupt nu devine 7,00');
 
-const explicitNumber = /(?:NUMAR|NWUAR|NOMAR|TOMNAR|NOUAR|ANAR)\s*[:#.-]*\s*(?:[A-Z]{1,8}[., ]*)?(\d{1,16})/i;
+const explicitNumber = /(?:NUMAR|NWUAR|NOMAR|TOMNAR|NOUAR|NHONAR|ANAR)\s*[:#.-]*\s*(?:[A-Z]{1,8}[., ]*)?(\d{1,16})/i;
 const weakNumber = /\bNR\.?\s*[:#.-]*\s*(\d{1,16})/i;
 const numberNoise = /REG\.?\s*COM|ORD\.?\s*REG|ADRES|CUI|CIF|IBAN|CONT|TELEFON|TEL\.?|FAX|CAPITAL|FACTUR/i;
 function documentNumber(lines) {
@@ -66,8 +95,27 @@ assert.equal(documentNumber([
   'Nr.Reg.Com. J2006004970406 Seria DSE nr. 1627',
   'Banca Libra Bank Nr. 1827',
 ]), '1827', 'numarul Registrului Comertului nu devine numarul chitantei');
-assert.equal('Chiluya Soric/Nouar: DI , 20080.'.match(explicitNumber)[1], '20080',
-  'varianta OCR Nouar cu serie inline trebuie acceptata');
+assert.equal('Chitata Serie/Nhonar: DI. 200861'.match(explicitNumber)[1], '200861',
+  'varianta OCR Nhonar cu serie inline trebuie acceptata');
+
+function completeDocument(text) {
+  const up = text.toUpperCase();
+  const chitanta = /CH[I1L][T7L][A-ZĂÂÎȘȚ]{3,}/i.test(up);
+  if (chitanta) return up.includes('PRIMIT DE LA') && up.includes('SUMA');
+  const header = /COD\s*FISCAL|CUI|NUMAR\s*BON|\bRO\d{6,10}\b/i.test(up);
+  const body = /BON\s+FISCAL|(?<!SUB)\bTOTAL\b(?!\s*TVA)/i.test(up);
+  return header && body;
+}
+assert.equal([
+  'COD FISCAL RO34626689',
+  'TOTAL 183,48 TOTAL TVA 31,84',
+].every(completeDocument), false,
+'un antet si un footer ale aceluiasi bon nu sunt doua documente autonome');
+assert.equal([
+  'COD FISCAL RO34626689 NUMAR BON 114 TOTAL 180,75 BON FISCAL',
+  'CUI RO22254794 NUMAR BON 31 TOTAL 613,10 BON FISCAL',
+].every(completeDocument), true,
+'doua clustere complete pot fi acceptate ca documente distincte');
 
 function samePhysical(a, b) {
   const x1 = Math.max(a.x, b.x), y1 = Math.max(a.y, b.y);
@@ -102,8 +150,10 @@ assert.match(routeSource, /TextRecognizerPro\.deduplicate\(refinedCandidates\)/,
   'documentele rafinate trebuie deduplicate din nou');
 assert.match(routeSource, /expandHorizontally: !hasHorizontalNeighbor/,
   'blocurile laterale ale unei chitante singure trebuie recuperate');
-assert.match(routeSource, /expandDownward: !hasVerticalNeighborBelow/,
+assert.match(routeSource, /expandDownward: needsLowerRecovery && !hasVerticalNeighborBelow/,
   'corpul slab de sub ultimul antet din coloana trebuie recuperat');
+assert.match(routeSource, /shouldAcceptRefinedSplit/,
+  'a doua segmentare trebuie acceptata doar pentru documente autonome');
 assert.match(routeSource, /vatAmounts\.reduce\(0, \+\)/,
   'TVA-ul cotelor multiple trebuie agregat');
 assert.match(routeSource, /handwritingPass\(\s*on: rotImg,\s*clusterBoxes: clean\)/,

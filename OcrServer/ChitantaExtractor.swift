@@ -198,7 +198,7 @@ enum ChitantaExtractor {
             return false
         }
         let title = t.range(of: "\\bCH[I1L][T7L][A-Z]{3,}\\b", options: .regularExpression) != nil
-        let formEvidence = t.range(of: "(?:SERIE|SERIA|SERIC)\\s*[/\\-]?\\s*(?:NUMAR|NWUAR|NOMAR|TOMNAR|NOUAR|ANAR)",
+        let formEvidence = t.range(of: "(?:SERIE|SERIA|SERIC)\\s*[/\\-]?\\s*(?:NUMAR|NWUAR|NOMAR|TOMNAR|NOUAR|NHONAR|ANAR)",
                                    options: .regularExpression) != nil
             || (t.contains("PRIMIT DE LA") && t.contains("SUMA"))
         let courierEvidence = t.range(
@@ -251,13 +251,13 @@ enum ChitantaExtractor {
             pattern: "REG\\.?\\s*COM|ORD\\.?\\s*REG|ADRES|CUI|CIF|C\\.?F\\.?|IBAN|CONT|TELEFON|TEL\\.?|FAX|CAPITAL|FACTUR",
             options: [.caseInsensitive])
         let seriesRx = try! NSRegularExpression(
-            pattern: "(?:SERIE|SERIA|SERIC)(?:\\s*[/\\-]\\s*(?:NUMAR|NWUAR|NOMAR|TOMNAR|NOUAR|ANAR))?\\s*[:#.\\-]*\\s*([A-Z]{1,8})(?=\\s|[.\\-/]|\\d|$)",
+            pattern: "(?:SERIE|SERIA|SERIC)(?:\\s*[/\\-]\\s*(?:NUMAR|NWUAR|NOMAR|TOMNAR|NOUAR|NHONAR|ANAR))?\\s*[:#.\\-]*\\s*([A-Z]{1,8})(?=\\s|[.\\-/]|\\d|$)",
             options: [.caseInsensitive])
         let inlineSeriesRx = try! NSRegularExpression(
-            pattern: "(?:NUMAR|NWUAR|NOMAR|TOMNAR|NOUAR|ANAR)\\s*[:#.\\-]*\\s*([A-Z]{1,8})[., ]+\\d{1,16}",
+            pattern: "(?:NUMAR|NWUAR|NOMAR|TOMNAR|NOUAR|NHONAR|ANAR)\\s*[:#.\\-]*\\s*([A-Z]{1,8})[., ]+\\d{1,16}",
             options: [.caseInsensitive])
         let explicitNumberRx = try! NSRegularExpression(
-            pattern: "(?:NUMAR|NWUAR|NOMAR|TOMNAR|NOUAR|ANAR)\\s*[:#.\\-]*\\s*(?:[A-Z]{1,8}[., ]*)?(\\d{1,16})",
+            pattern: "(?:NUMAR|NWUAR|NOMAR|TOMNAR|NOUAR|NHONAR|ANAR)\\s*[:#.\\-]*\\s*(?:[A-Z]{1,8}[., ]*)?(\\d{1,16})",
             options: [.caseInsensitive])
         let seriesNumberRx = try! NSRegularExpression(
             pattern: "(?:SERIE|SERIA|SERIC)\\s*[:#.\\-]*\\s*[A-Z]{1,8}(?:\\s*[/.,-]\\s*|\\s+)(?:NR\\.?\\s*)?(\\d{1,16})",
@@ -265,7 +265,10 @@ enum ChitantaExtractor {
         let nrNumberRx = try! NSRegularExpression(
             pattern: "\\bNR\\.?\\s*[:#.\\-]*\\s*(\\d{1,16})",
             options: [.caseInsensitive])
-        let headerLines = linesFocused + linesDigits + linesText
+        // Pentru antet, citirea bruta pastreaza cel mai bine codurile tiparite.
+        // OCR-ul focalizat ramane fallback; pus primul introducea uneori cuvinte
+        // precum "SERIA" drept valoare si trunchia numarul real.
+        let headerLines = linesDigits + linesFocused + linesText
         for line in headerLines where r.serie == nil {
             let up = normalize(line)
             let range = NSRange(up.startIndex..., in: up)
@@ -401,13 +404,24 @@ enum ChitantaExtractor {
         let fuzzyAmountRx = try! NSRegularExpression(
             pattern: "(?<![A-Z0-9])([0-9OQDILZSEAGTBH]{1,5})\\s*(?:[.,+:]|\\s)\\s*([0-9OQDILZSEAGTBH]{2})(?![A-Z0-9])",
             options: [.caseInsensitive])
-        func collectAmounts(_ lines: [String], exact: inout [Double], repaired: inout [Double]) {
+        let compactAmountRx = try! NSRegularExpression(
+            pattern: "\\bSUM(?:A|Ă|K|KI|AI)(?:\\s+DE)?[^0-9]{0,8}([0-9]{5,7})\\b",
+            options: [.caseInsensitive])
+        func collectAmounts(_ lines: [String], allowCompact: Bool = false,
+                            exact: inout [Double], repaired: inout [Double]) {
             for line in lines {
                 let up = normalize(line)
                 // Tolereaza confuzii OCR uzuale doar in zona etichetata "Suma".
                 guard up.range(of: "\\bSUM(?:A|Ă|K|KI|AI)\\b", options: .regularExpression) != nil else { continue }
                 exact.append(contentsOf: FinExtract.amounts(in: line))
                 let range = NSRange(up.startIndex..., in: up)
+                if allowCompact, let match = compactAmountRx.firstMatch(in: up, range: range) {
+                    let token = (up as NSString).substring(with: match.range(at: 1))
+                    let split = token.index(token.endIndex, offsetBy: -2)
+                    if let value = Double("\(token[..<split]).\(token[split...])"), value > 0 {
+                        exact.append(value.ron2)
+                    }
+                }
                 for match in fuzzyAmountRx.matches(in: up, range: range) {
                     let ns = up as NSString
                     let wholes = digitVariants(ns.substring(with: match.range(at: 1)))
@@ -422,7 +436,8 @@ enum ChitantaExtractor {
                 }
             }
         }
-        collectAmounts(linesFocused, exact: &exactFocused, repaired: &repairedFocused)
+        collectAmounts(linesFocused, allowCompact: true,
+                       exact: &exactFocused, repaired: &repairedFocused)
         collectAmounts(linesDigits, exact: &exactDigits, repaired: &repairedDigits)
         collectAmounts(linesText, exact: &exactText, repaired: &repairedText)
 
@@ -612,7 +627,9 @@ enum ChitantaExtractor {
             return String(format: "%04d-%02d-%02d", y, mo, d)
         }
 
-        let all = linesText + linesDigits
+        // Trecerea focalizata este prima in `linesDigits`; folosim intai
+        // cifrele fara corectie lingvistica, apoi OCR-ul de scris de mana.
+        let all = linesDigits + linesText
         let clean = all.filter { line in
             noise.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)) == nil
         }
@@ -645,17 +662,26 @@ extension TextRecognizerPro {
         let anchors = clusterBoxes.filter { word in
             let t = normalized(word.text)
             return t.contains("SUM") || t.contains("DATA") || t.contains("SERI")
-                || t.contains("NUMAR") || t.contains("NOUAR") || t == "NR" || t == "NR."
+                || t.contains("NUMAR") || t.contains("NOUAR") || t.contains("NHONAR")
+                || t.range(of: "^CH[I1L][T7L]", options: .regularExpression) != nil
+                || t == "NR" || t == "NR."
         }.sorted { $0.y < $1.y }
         guard !anchors.isEmpty else { return [] }
 
         let minX = max(0, clusterBoxes.map { $0.x }.min()! - 20)
         let maxX = min(Double(image.width), clusterBoxes.map { $0.x + $0.w }.max()! + 20)
+        let documentMaxY = clusterBoxes.map { $0.y + $0.h }.max()!
         var bands: [CGRect] = []
         for anchor in anchors {
             let h = max(18, anchor.h)
+            let anchorText = normalized(anchor.text)
+            let isTitle = anchorText.range(of: "^CH[I1L][T7L]",
+                                           options: .regularExpression) != nil
             let y = max(0, anchor.y - h * 1.8)
-            let bottom = min(Double(image.height), anchor.y + anchor.h + h * 2.2)
+            let lowerReach = isTitle ? h * 12.0 : h * 2.2
+            let bottom = min(Double(image.height),
+                             min(documentMaxY + h * 2,
+                                 anchor.y + anchor.h + lowerReach))
             let rect = CGRect(x: minX, y: y, width: maxX - minX, height: bottom - y)
             if let last = bands.last, last.intersects(rect) {
                 bands[bands.count - 1] = last.union(rect)
@@ -704,7 +730,8 @@ extension TextRecognizerPro {
             if let contrast = highContrast(scaled) { variants.append(contrast) }
             for variant in variants {
                 let (local, _, _) = await wordBoxes(on: variant)
-                result.append(contentsOf: local.map { word in
+                let alternatives = await alternativeLineBoxes(on: variant)
+                result.append(contentsOf: (local + alternatives).map { word in
                     OCRBoxItem(text: word.text,
                                x: word.x / 3 + integral.origin.x,
                                y: word.y / 3 + integral.origin.y,

@@ -82,7 +82,7 @@ const ctx = /(?:COD\s*FISCAL|COD\s*IDENTIFICARE\s*FISCALA|\bC\.?\s*I\.?\s*F\b|\b
 const excl = /CLIENT|CNP|CUMPARATOR|BENEF/i;
 const strong = /NUMAR\s*BON|COD\s*FISCAL|COD\s*IDENTIFICARE\s*FISCALA|\bR[O0]\s?\d{6,10}\b/i;
 const anchor = /NUMAR\s*BON|COD\s*FISCAL|COD\s*IDENTIFICARE\s*FISCALA|\bC\.?\s*I\.?\s*F\b|\bCUI\b|\bR[O0]\s?\d{6,10}\b|\b(?:S\.?\s?R\.?\s?L\.?|S\.?A\.?|P\.?F\.?A\.?)\b/i;
-const chitantaTitle = /\bCH[I1L][T7L][A-ZĂÂÎȘȚ]{3,}\b|(?:SERIE|SERIA|SERIC)\s*[\/-]?\s*(?:NUMAR|NWUAR|NOMAR|TOMNAR|NOUAR|ANAR)/i;
+const chitantaTitle = /\bCH[I1L][T7L][A-ZĂÂÎȘȚ]{3,}\b|(?:SERIE|SERIA|SERIC)\s*[\/-]?\s*(?:NUMAR|NWUAR|NOMAR|TOMNAR|NOUAR|NHONAR|ANAR)/i;
 
 function looksLikeSingleChitanta(words) {
   const text = groupLines(words).join(' ').toUpperCase();

@@ -183,6 +183,38 @@ final class TextRecognizerPro {
         return (items, W, H)
     }
 
+    /// Variantele Vision pentru o linie sunt utile la cifre scrise de mana:
+    /// prima ipoteza poate pierde separatorul, iar a doua il poate pastra.
+    /// Returnam liniile alternative ca dovezi; extractorul le valideaza ulterior
+    /// cu eticheta campului si cu celelalte treceri OCR.
+    func alternativeLineBoxes(on image: CGImage,
+                              maxCandidates: Int = 4) async -> [OCRBoxItem] {
+        let W = image.width, H = image.height
+        var request = RecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = false
+        request.recognitionLanguages = [Locale.Language(identifier: "ro-RO"),
+                                        Locale.Language(identifier: "en-US")]
+        let observations = (try? await request.perform(on: image)) ?? []
+        var result: [OCRBoxItem] = []
+        for observation in observations {
+            for candidate in observation.topCandidates(maxCandidates) {
+                let text = candidate.string
+                guard !text.isEmpty,
+                      let quad = try? candidate.boundingBox(for: text.startIndex..<text.endIndex)
+                else { continue }
+                let corners = [quad.topLeft, quad.topRight, quad.bottomLeft, quad.bottomRight]
+                let xs = corners.map { Double($0.x) * Double(W) }
+                let ys = corners.map { (1.0 - Double($0.y)) * Double(H) }
+                let minX = xs.min() ?? 0, maxX = xs.max() ?? 0
+                let minY = ys.min() ?? 0, maxY = ys.max() ?? 0
+                result.append(OCRBoxItem(text: text, x: minX, y: minY,
+                                         w: maxX - minX, h: maxY - minY, rect: nil))
+            }
+        }
+        return result
+    }
+
     // MARK: - Crop per bon + enhance + re-OCR (in spatiul imaginii rotite)
 
     func cropAndReOCR(rotatedImage: CGImage,

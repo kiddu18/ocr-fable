@@ -27,7 +27,7 @@ import Foundation
 enum ReceiptSegmenterV2 {
 
     private static let chitantaTitleRx = try! NSRegularExpression(
-        pattern: "\\bCH[I1L][T7L][A-ZĂÂÎȘȚ]{3,}\\b|(?:SERIE|SERIA|SERIC)\\s*[/\\-]?\\s*(?:NUMAR|NWUAR|NOMAR|TOMNAR|NOUAR|ANAR)",
+        pattern: "\\bCH[I1L][T7L][A-ZĂÂÎȘȚ]{3,}\\b|(?:SERIE|SERIA|SERIC)\\s*[/\\-]?\\s*(?:NUMAR|NWUAR|NOMAR|TOMNAR|NOUAR|NHONAR|ANAR)",
         options: [.caseInsensitive])
 
     private static func looksLikeSingleChitanta(_ cluster: [OCRBoxItem]) -> Bool {
@@ -301,6 +301,25 @@ enum ReceiptSegmenterV2 {
                strongExclRx.firstMatch(in: l, range: r) == nil { return true }
         }
         return false
+    }
+
+    /// A doua segmentare este acceptata numai daca FIECARE bucata este un
+    /// document autonom, nu doar un antet sau un footer desprins de acelasi bon.
+    /// Regula foloseste semantica documentului, nu numarul/pozitia bonurilor.
+    static func shouldAcceptRefinedSplit(_ clusters: [[OCRBoxItem]]) -> Bool {
+        guard clusters.count > 1 else { return false }
+        return clusters.allSatisfy { cluster in
+            let text = groupLines(cluster).joined(separator: " ").uppercased()
+            let isChitanta = looksLikeSingleChitanta(cluster)
+            if isChitanta {
+                return text.contains("PRIMIT DE LA") && text.contains("SUMA")
+            }
+            let hasMerchantHeader = hasFiscalHeader(cluster)
+            let hasFiscalBody = text.range(
+                of: "BON\\s+FISCAL|(?<!SUB)\\bTOTAL\\b(?!\\s*TVA)",
+                options: .regularExpression) != nil
+            return hasMerchantHeader && hasFiscalBody
+        }
     }
 
     private static func strongGroupCount(_ cluster: [OCRBoxItem], mh: Double) -> Int {
