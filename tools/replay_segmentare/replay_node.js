@@ -182,9 +182,40 @@ function forceSplit(cluster,mh,needBoth){
 }
 function enforceOneHeader(cluster,mh,depth=0){const isChitanta=looksLikeSingleChitanta(cluster),multiCui=!isChitanta&&merchantCuis(cluster).size>=2,multiHdr=isChitanta?chitantaHeaderGroupCount(cluster,mh)>=2:strongGroupCount(cluster,mh)>=2;if(depth>6||(!multiCui&&!multiHdr))return[cluster];const split=forceSplit(cluster,mh,!multiCui);return split?[...enforceOneHeader(split[0],mh,depth+1),...enforceOneHeader(split[1],mh,depth+1)]:[cluster];}
 
+function completeDocument(words) {
+  const text = groupLines(words).join(' ').toUpperCase();
+  if (looksLikeSingleChitanta(words)) {
+    return text.includes('PRIMIT DE LA') && text.includes('SUMA');
+  }
+  return hasFiscalHeader(words)
+    && /BON\s+FISCAL|(?<!SUB)\bTOTAL\b(?!\s*TVA)/i.test(text);
+}
+
+function shouldAcceptRefinedSplit(clusters) {
+  return clusters.length > 1 && clusters.every(completeDocument);
+}
+
+function splitSideBySideDocuments(cluster, mh, depth = 0) {
+  if (depth >= 4 || cluster.length < 24 || looksLikeSingleChitanta(cluster)) return [cluster];
+  const token = /^(?:NUMAR|COD|FISCAL|CUI|CIF|R[O0][0-9OQDILSZB@]{4,})[.:]?$/i;
+  const anchors = cluster.filter(w => token.test(w.text)).map(w => w.x + w.w / 2).sort((a,b) => a-b);
+  const cuts = [];
+  for (let i=0; i<anchors.length-1; i++) {
+    const gap = anchors[i+1] - anchors[i];
+    if (gap > mh*5) cuts.push({gap, x:(anchors[i]+anchors[i+1])/2});
+  }
+  for (const candidate of cuts.sort((a,b) => b.gap-a.gap)) {
+    const left = cluster.filter(w => w.x+w.w/2 < candidate.x);
+    const right = cluster.filter(w => w.x+w.w/2 >= candidate.x);
+    if (left.length < 12 || right.length < 12 || !shouldAcceptRefinedSplit([left,right])) continue;
+    return [...splitSideBySideDocuments(left,mh,depth+1), ...splitSideBySideDocuments(right,mh,depth+1)];
+  }
+  return [cluster];
+}
+
 function absorbOrphans(clusters,mh){const anchored=clusters.filter(hasFiscalHeader),orphans=clusters.filter(c=>!hasFiscalHeader(c));if(!anchored.length)return clusters;for(const o of orphans){const ob=bbox(o);let bi=-1,bk=[Infinity,Infinity];anchored.forEach((a,i)=>{const ab=bbox(a),inter=Math.min(ob.maxX,ab.maxX)-Math.max(ob.minX,ab.minX),minw=Math.min(ob.maxX-ob.minX,ab.maxX-ab.minX),xo=inter>0&&minw>0?inter/minw:0,vg=Math.max(ab.minY-ob.maxY,ob.minY-ab.maxY,0),hg=Math.max(ab.minX-ob.maxX,ob.minX-ab.maxX,0),key=[xo>.3?0:1,xo>.3?vg:Math.hypot(vg,hg)];if(key[0]<bk[0]||(key[0]===bk[0]&&key[1]<bk[1])){bk=key;bi=i;}});if(bi>=0&&bk[1]<=mh*20)anchored[bi].push(...o);}return anchored;}
 
-function segment(words){words=normalizeOrientation(words);const mh=medianHeight(words),parts=[];xycut(words,mh,mh*1.5,parts);let m=mergeFragments(parts.filter(p=>p.length>=8||chitantaTitle.test(groupLines(p).join(' '))),mh).flatMap(p=>splitByAnchors(p,mh)).flatMap(p=>enforceOneHeader(p,mh));m=absorbOrphans(m,mh);return m.filter(p=>p.length>=12).sort((a,b)=>Math.floor(bbox(a).minX/400)-Math.floor(bbox(b).minX/400)||bbox(a).minY-bbox(b).minY);}
+function segment(words){words=normalizeOrientation(words);const mh=medianHeight(words),parts=[];xycut(words,mh,mh*1.5,parts);let m=mergeFragments(parts.filter(p=>p.length>=8||chitantaTitle.test(groupLines(p).join(' '))),mh).flatMap(p=>splitByAnchors(p,mh)).flatMap(p=>enforceOneHeader(p,mh));m=absorbOrphans(m,mh);const ordered=m.filter(p=>p.length>=12).sort((a,b)=>Math.floor(bbox(a).minX/400)-Math.floor(bbox(b).minX/400)||bbox(a).minY-bbox(b).minY);return ordered.flatMap(c=>splitSideBySideDocuments(c,mh));}
 
 function describe(clusters){console.log(`clusters=${clusters.length}`);clusters.forEach((c,i)=>{const b=bbox(c),text=groupLines(c).join(' | '),names=[...new Set((text.match(/MAGISTRAL|MOL|DOUGLAS|TURIST|ROG|DAISY|AMERIS|DONA|FAN/ig)||[]).map(x=>x.toUpperCase()))];console.log(`${i}: n=${c.length} x=${b.minX.toFixed(0)}-${b.maxX.toFixed(0)} y=${b.minY.toFixed(0)}-${b.maxY.toFixed(0)} names=${names.join(',')} cuis=${[...merchantCuis(c)].join(',')}`);});}
 
@@ -196,4 +227,4 @@ if (require.main === module) {
 }
 
 module.exports = { normalizeOrientation, segment, groupLines, bbox, merchantCuis,
-  looksLikeSingleChitanta };
+  looksLikeSingleChitanta, shouldAcceptRefinedSplit, splitSideBySideDocuments };

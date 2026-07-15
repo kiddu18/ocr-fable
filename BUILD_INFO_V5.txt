@@ -1,0 +1,21 @@
+Pachet: OCR_Iphone_fixed_universal_complete_v5_2026-07-15
+Data pregatirii: 2026-07-15
+
+Baza exacta:
+  OCR_Iphone_fixed_universal_complete_v4_2026-07-14.zip
+  SHA-256: F547AB8A3A0F39345AE14EA0BDA0A368E32090EA5874DE0D103A589BE025CB25
+  commit inclus in baza: 140c559
+
+Feedback inclus in regresii:
+  bonuri_feedback_v4.txt
+  SHA-256: 050AF01F37759F901B282F9A203695317E07ABD73DDFDD613617A8DC9686BCB1
+  chitante_feedback_v4.txt
+  SHA-256: 41B6CCE8B2AA05B9F376EDCC0E8842ADAFADB86AFAAE53A49FDBDCD8F01202F1
+
+Verificare executata:
+  node tools/replay_segmentare/regression_node.js
+  rezultat: OK, toate regresiile universale au trecut
+
+Nota:
+  Compilarea Apple Vision/UIKit/Vapor se executa in Xcode pe macOS; mediul
+  Windows folosit pentru pregatirea arhivei nu include toolchain-ul Apple.

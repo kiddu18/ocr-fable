@@ -81,13 +81,14 @@ enum ReceiptSegmenterV2 {
         merged = merged.flatMap { enforceOneHeader($0, medianHeight: mh) }
         merged = absorbOrphans(merged, medianHeight: mh)
 
-        let result = merged.filter { $0.count >= 12 }
+        let ordered = merged.filter { $0.count >= 12 }
             .sorted { a, b in
                 let ba = bbox(a), bb2 = bbox(b)
                 let ka = Int((ba.minX / 400.0).rounded(.down))
                 let kb = Int((bb2.minX / 400.0).rounded(.down))
                 return ka != kb ? ka < kb : ba.minY < bb2.minY
             }
+        let result = ordered.flatMap { splitSideBySideDocuments($0, medianHeight: mh) }
         guard needsRotation else { return result }
         return result.map { cluster in
             cluster.map { word in
@@ -96,6 +97,40 @@ enum ReceiptSegmenterV2 {
                            w: word.h, h: word.w, rect: nil)
             }
         }
+    }
+
+    /// Doua bonuri alaturate pot avea un spatiu foarte mic intre ele, astfel
+    /// incat proiectia XY-cut devine continua. Folosim doar pozitiile tokenilor
+    /// de antet fiscal pentru a propune taieturi si acceptam taietura numai daca
+    /// ambele jumatati sunt documente complete (antet + total/footer fiscal).
+    private static func splitSideBySideDocuments(_ cluster: [OCRBoxItem],
+                                                  medianHeight mh: Double,
+                                                  depth: Int = 0) -> [[OCRBoxItem]] {
+        guard depth < 4, cluster.count >= 24,
+              !looksLikeSingleChitanta(cluster) else { return [cluster] }
+        let tokenRx = try! NSRegularExpression(
+            pattern: "^(?:NUMAR|COD|FISCAL|CUI|CIF|R[O0][0-9OQDILSZB@]{4,})[.:]?$",
+            options: [.caseInsensitive])
+        let anchors = cluster.filter { word in
+            tokenRx.firstMatch(in: word.text,
+                               range: NSRange(word.text.startIndex..., in: word.text)) != nil
+        }.map { $0.x + $0.w / 2 }.sorted()
+        guard anchors.count >= 2 else { return [cluster] }
+
+        var cuts: [(gap: Double, x: Double)] = []
+        for i in 0..<(anchors.count - 1) {
+            let gap = anchors[i + 1] - anchors[i]
+            if gap > mh * 5 { cuts.append((gap, (anchors[i] + anchors[i + 1]) / 2)) }
+        }
+        for candidate in cuts.sorted(by: { $0.gap > $1.gap }) {
+            let left = cluster.filter { $0.x + $0.w / 2 < candidate.x }
+            let right = cluster.filter { $0.x + $0.w / 2 >= candidate.x }
+            guard left.count >= 12, right.count >= 12,
+                  shouldAcceptRefinedSplit([left, right]) else { continue }
+            return splitSideBySideDocuments(left, medianHeight: mh, depth: depth + 1)
+                 + splitSideBySideDocuments(right, medianHeight: mh, depth: depth + 1)
+        }
+        return [cluster]
     }
 
     // MARK: - XY-cut recursiv (neschimbat ca idee)

@@ -391,93 +391,81 @@ actor VaporServer {
                 // selectorul din pagina: "auto" | "bon" | "chitanta" (doc_type = clientul nou, processing_mode = cel vechi)
                 let mode = (upload.doc_type ?? upload.processing_mode ?? "auto").lowercased()
                 
-                var refinedCandidates: [ReceiptDetection] = []
-                for (detIndex, det) in detections.enumerated() {
-                    let rotImg = rotatedImage(det.turns)
-
-                    // Daca pe acelasi rand nu exista alt document, extindem doar
-                    // ORIZONTAL crop-ul. Astfel recuperam blocurile laterale
-                    // Serie/Numar/Data ale formularelor, fara a lipi documentele
-                    // care sunt realmente unul langa altul.
-                    let a = det.baseRect
-                    let hasHorizontalNeighbor = detections.enumerated().contains { pair in
-                        let (otherIndex, other) = pair
-                        guard otherIndex != detIndex else { return false }
+                // Fiecare detectie initiala ramane EXACT un document. Ii atribuim
+                // o celula a paginii, taiata la jumatatea distantei fata de vecinii
+                // de pe acelasi rand/aceeasi coloana. Re-OCR-ul poate astfel vedea
+                // zone slabe din formular, dar nu poate intra in documentul vecin.
+                func isolatedCell(for index: Int) -> CGRect {
+                    let a = detections[index].baseRect
+                    var left = 0.0, top = 0.0
+                    var right = Double(base.width), bottom = Double(base.height)
+                    for (otherIndex, other) in detections.enumerated() where otherIndex != index {
                         let b = other.baseRect
                         let yInter = min(a.maxY, b.maxY) - max(a.minY, b.minY)
                         let minH = min(a.height, b.height)
-                        let yOverlap = (yInter > 0 && minH > 0) ? yInter / minH : 0
+                        let yOverlap = yInter > 0 && minH > 0 ? yInter / minH : 0
                         let xInter = min(a.maxX, b.maxX) - max(a.minX, b.minX)
                         let minW = min(a.width, b.width)
-                        let xOverlap = (xInter > 0 && minW > 0) ? xInter / minW : 0
-                        let hGap = max(b.minX - a.maxX, a.minX - b.maxX, 0)
-                        return yOverlap > 0.25 && xOverlap < 0.20
-                            && hGap < max(a.width, b.width) * 0.80
-                    }
-                    // Daca acesta este ultimul fragment pe coloana lui, crop-ul
-                    // continua pana la marginea de jos. Recupereaza corpul slab
-                    // al unei chitante al carei antet a fost singurul text vazut
-                    // in prima trecere, fara sa invadeze documentul de dedesubt.
-                    let hasVerticalNeighborBelow = detections.enumerated().contains { pair in
-                        let (otherIndex, other) = pair
-                        guard otherIndex != detIndex else { return false }
-                        let b = other.baseRect
-                        guard b.minY >= a.maxY else { return false }
-                        let xInter = min(a.maxX, b.maxX) - max(a.minX, b.minX)
-                        let minWidth = min(a.width, b.width)
-                        return xInter > 0 && minWidth > 0 && xInter / minWidth > 0.20
-                    }
-                    let initialText = ReceiptSegmenterV2.groupLines(det.words)
-                        .joined(separator: " ")
-                    let needsLowerRecovery = ChitantaExtractor.looksLikeChitanta(initialText)
-                        && !initialText.uppercased().contains("PRIMIT DE LA")
-                        && !initialText.uppercased().contains("SUMA")
-                    let firstClean = await pro.cropAndReOCR(
-                        rotatedImage: rotImg, clusterBoxes: det.words,
-                        expandHorizontally: !hasHorizontalNeighbor,
-                        expandDownward: needsLowerRecovery && !hasVerticalNeighborBelow)
-
-                    // A doua segmentare este esentiala: prima trecere poate vedea
-                    // o banda cu 2-3 documente, iar re-OCR-ul curat dezvaluie abia
-                    // acum golurile si antetele fiecaruia. Nu exista praguri per poza.
-                    let refined = ReceiptSegmenterV2.segment(firstClean)
-                    let acceptRefinedSplit = ReceiptSegmenterV2.shouldAcceptRefinedSplit(refined)
-                    let subclusters = acceptRefinedSplit ? refined : [firstClean]
-                    if subclusters.count > 1 {
-                        print("Rafinare dupa re-OCR: 1 zona -> \(subclusters.count) documente")
-                    }
-
-                    for subcluster in subclusters {
-                        let clean: [OCRBoxItem]
-                        if subclusters.count > 1 {
-                            clean = await pro.cropAndReOCR(
-                                rotatedImage: rotImg, clusterBoxes: subcluster)
+                        let xOverlap = xInter > 0 && minW > 0 ? xInter / minW : 0
+                        let separatesOnX: Bool
+                        let separatesOnY: Bool
+                        if yOverlap > 0.20 && xOverlap <= 0.20 {
+                            // Documente pe acelasi rand/coloana: suprapunerea
+                            // proiectata indica direct axa sigura de separare.
+                            separatesOnX = true
+                            separatesOnY = false
+                        } else if xOverlap > 0.20 && yOverlap <= 0.20 {
+                            separatesOnX = false
+                            separatesOnY = true
                         } else {
-                            clean = firstClean
+                            // Pentru aranjamente diagonale, suprapuneri pe ambele
+                            // axe sau pozitii neregulate alegem
+                            // axa pe care centrele sunt cel mai clar separate,
+                            // raportat la dimensiunea documentelor. Astfel niciun
+                            // vecin nu ramane in crop doar fiindca nu se suprapune
+                            // perfect pe orizontala sau verticala.
+                            let dx = abs(a.midX - b.midX) / max(max(a.width, b.width), 1)
+                            let dy = abs(a.midY - b.midY) / max(max(a.height, b.height), 1)
+                            separatesOnX = dx >= dy
+                            separatesOnY = dy > dx
                         }
-                        let bb = TextRecognizerPro.bbox(clean)
-                        let rotRect = CGRect(x: bb.minX, y: bb.minY,
-                                             width: bb.maxX - bb.minX,
-                                             height: bb.maxY - bb.minY)
-                        let baseRect = TextRecognizerPro.mapRectToBase(
-                            rotRect, turns: det.turns,
-                            rotatedW: rotImg.width, rotatedH: rotImg.height)
-                        refinedCandidates.append(ReceiptDetection(
-                            turns: det.turns, words: clean, baseRect: baseRect,
-                            score: TextRecognizerPro.documentQuality(clean)))
+                        if separatesOnX {
+                            let boundary = Double((a.midX + b.midX) / 2)
+                            if b.midX < a.midX { left = max(left, boundary) }
+                            if b.midX > a.midX { right = min(right, boundary) }
+                        }
+                        if separatesOnY {
+                            let boundary = Double((a.midY + b.midY) / 2)
+                            if b.midY < a.midY { top = max(top, boundary) }
+                            if b.midY > a.midY { bottom = min(bottom, boundary) }
+                        }
                     }
+                    // Garda pentru detectii partial suprapuse: celula trebuie sa
+                    // ramana valida si sa contina centrul detectiei sale.
+                    left = min(left, Double(a.midX) - 2)
+                    right = max(right, Double(a.midX) + 2)
+                    top = min(top, Double(a.midY) - 2)
+                    bottom = max(bottom, Double(a.midY) + 2)
+                    return CGRect(x: left, y: top,
+                                  width: right - left, height: bottom - top)
                 }
 
-                // Deduplicarea initiala nu poate compara corect o banda lata cu
-                // documentele obtinute abia dupa re-OCR. O repetam pe dreptunghiurile
-                // finale: aceasta elimina randurile dublate fara sa reduca 6 bonuri la 2.
-                let finalDetections = TextRecognizerPro.deduplicate(refinedCandidates)
-                    .sorted { a, b in
-                        let rowA = Int((a.baseRect.minY / 300).rounded(.down))
-                        let rowB = Int((b.baseRect.minY / 300).rounded(.down))
-                        return rowA != rowB ? rowA < rowB : a.baseRect.minX < b.baseRect.minX
-                    }
-                print("Documente finale dupa rafinare si deduplicare: \(finalDetections.count)")
+                var finalDetections: [ReceiptDetection] = []
+                finalDetections.reserveCapacity(detections.count)
+                for (detIndex, det) in detections.enumerated() {
+                    let rotImg = rotatedImage(det.turns)
+                    let baseCell = isolatedCell(for: detIndex)
+                    let rotatedCell = TextRecognizerPro.mapRectFromBase(
+                        baseCell, turns: det.turns,
+                        rotatedW: rotImg.width, rotatedH: rotImg.height)
+                    let clean = await pro.cropAndReOCR(
+                        rotatedImage: rotImg, cropRect: rotatedCell,
+                        fallbackBoxes: det.words)
+                    finalDetections.append(ReceiptDetection(
+                        turns: det.turns, words: clean, baseRect: det.baseRect,
+                        score: TextRecognizerPro.documentQuality(clean)))
+                }
+                print("Documente finale stabile: \(finalDetections.count)")
 
                 for det in finalDetections {
                     let rotImg = rotatedImage(det.turns)

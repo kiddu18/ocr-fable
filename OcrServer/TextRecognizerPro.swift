@@ -238,7 +238,21 @@ final class TextRecognizerPro {
                               y: max(0, minY - mY),
                               width: cropMaxX - cropX,
                               height: cropMaxY - max(0, minY - mY))
-        guard let crop = rotatedImage.cropping(to: cropRect) else { return clusterBoxes }
+        return await cropAndReOCR(rotatedImage: rotatedImage,
+                                 cropRect: cropRect,
+                                 fallbackBoxes: clusterBoxes)
+    }
+
+    /// Re-OCR intr-o celula deja izolata de vecini. Spre deosebire de extinderea
+    /// libera pe o directie, dreptunghiul explicit nu poate absorbi alt document.
+    func cropAndReOCR(rotatedImage: CGImage,
+                      cropRect requestedRect: CGRect,
+                      fallbackBoxes: [OCRBoxItem]) async -> [OCRBoxItem] {
+        let imageRect = CGRect(x: 0, y: 0,
+                               width: rotatedImage.width, height: rotatedImage.height)
+        let cropRect = requestedRect.integral.intersection(imageRect)
+        guard !cropRect.isNull, cropRect.width > 5, cropRect.height > 5,
+              let crop = rotatedImage.cropping(to: cropRect) else { return fallbackBoxes }
 
         let enhanced = enhanceForThermalPrint(crop)
         var (words, _, _) = await wordBoxes(on: enhanced)
@@ -250,7 +264,7 @@ final class TextRecognizerPro {
                                   w: words[i].w / scale, h: words[i].h / scale, rect: nil)
         }
         // fallback: daca re-OCR-ul a iesit mai prost, pastreaza prima trecere
-        return words.count >= clusterBoxes.count / 2 ? words : clusterBoxes
+        return words.count >= max(8, fallbackBoxes.count / 2) ? words : fallbackBoxes
     }
 
     private func enhanceForThermalPrint(_ image: CGImage) -> CGImage {
@@ -310,6 +324,27 @@ final class TextRecognizerPro {
                           width: r.width, height: r.height)
         default: // 3 (= 90° CW); inaltimea bazei = rw
             return CGRect(x: r.minY, y: rw - (r.minX + r.width),
+                          width: r.height, height: r.width)
+        }
+    }
+
+    /// Transformarea inversa: dreptunghi din pagina de baza in orientarea OCR.
+    static func mapRectFromBase(_ r: CGRect, turns: Int,
+                                rotatedW: Int, rotatedH: Int) -> CGRect {
+        let t = ((turns % 4) + 4) % 4
+        let rw = CGFloat(rotatedW), rh = CGFloat(rotatedH)
+        switch t {
+        case 0:
+            return r
+        case 1:
+            return CGRect(x: r.minY, y: rh - (r.minX + r.width),
+                          width: r.height, height: r.width)
+        case 2:
+            return CGRect(x: rw - (r.minX + r.width),
+                          y: rh - (r.minY + r.height),
+                          width: r.width, height: r.height)
+        default:
+            return CGRect(x: rw - (r.minY + r.height), y: r.minX,
                           width: r.height, height: r.width)
         }
     }

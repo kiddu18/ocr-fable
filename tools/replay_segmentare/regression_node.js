@@ -11,6 +11,14 @@ const bonuri = JSON.parse(fs.readFileSync(path.join(__dirname, 'cases', 'bonuri.
 assert.equal(segment(bonuri).length, 6,
   'plansa verticala 3x2 trebuie normalizata automat si separata in 6 documente');
 
+// Dump-ul trimis dupa rularea v4 contine un caz nou: bonurile Tourist si
+// Magistral din dreapta-jos nu au gol alb suficient pentru XY-cut. Separarea
+// dupa doua antete fiscale complete trebuie sa refaca tot 6 documente.
+const bonuriFeedbackV4 = JSON.parse(fs.readFileSync(
+  path.join(__dirname, 'cases', 'bonuri_feedback_v4.txt'), 'utf8'));
+assert.equal(segment(bonuriFeedbackV4).length, 6,
+  'feedback-ul v4 trebuie separat in exact 6 bonuri, fara fragmentare sau lipire');
+
 const bonClusters = segment(bonuri);
 const douglas = bonClusters.find(c => groupLines(c).join(' ').toUpperCase().includes('DOUGLAS'));
 assert.ok(douglas, 'bonul Douglas trebuie pastrat ca document distinct');
@@ -136,24 +144,63 @@ for (const candidate of duplicateCandidates.sort((a, b) => b.score - a.score)) {
 }
 assert.equal(deduped.length, 6, '8 candidati suprapusi trebuie sa ramana 6 documente fizice');
 
+function isolatedCell(rects, index, pageW, pageH) {
+  const a = rects[index], midX = r => r.x+r.w/2, midY = r => r.y+r.h/2;
+  let left=0, top=0, right=pageW, bottom=pageH;
+  rects.forEach((b,j) => {
+    if (j===index) return;
+    const yi=Math.min(a.y+a.h,b.y+b.h)-Math.max(a.y,b.y);
+    const xi=Math.min(a.x+a.w,b.x+b.w)-Math.max(a.x,b.x);
+    const yo=yi>0?yi/Math.min(a.h,b.h):0, xo=xi>0?xi/Math.min(a.w,b.w):0;
+    let sx,sy;
+    if(yo>.2&&xo<=.2){sx=true;sy=false}
+    else if(xo>.2&&yo<=.2){sx=false;sy=true}
+    else {const dx=Math.abs(midX(a)-midX(b))/Math.max(a.w,b.w,1),dy=Math.abs(midY(a)-midY(b))/Math.max(a.h,b.h,1);sx=dx>=dy;sy=dy>dx}
+    if(sx){const m=(midX(a)+midX(b))/2;if(midX(b)<midX(a))left=Math.max(left,m);else right=Math.min(right,m)}
+    if(sy){const m=(midY(a)+midY(b))/2;if(midY(b)<midY(a))top=Math.max(top,m);else bottom=Math.min(bottom,m)}
+  });
+  return {x:left,y:top,w:right-left,h:bottom-top};
+}
+const irregular = [
+  {x:30,y:20,w:190,h:280}, {x:280,y:55,w:170,h:235},
+  {x:80,y:350,w:180,h:230}, {x:340,y:390,w:145,h:200},
+];
+for (let i=0;i<irregular.length;i++) {
+  const cell=isolatedCell(irregular,i,520,620), a=irregular[i];
+  const cx=a.x+a.w/2,cy=a.y+a.h/2;
+  assert.ok(cx>=cell.x&&cx<=cell.x+cell.w&&cy>=cell.y&&cy<=cell.y+cell.h,
+    'celula izolata trebuie sa isi pastreze centrul documentului');
+  irregular.forEach((b,j)=>{if(j!==i){const bx=b.x+b.w/2,by=b.y+b.h/2;assert.ok(!(bx>cell.x&&bx<cell.x+cell.w&&by>cell.y&&by<cell.y+cell.h),'celula izolata nu trebuie sa contina centrul vecinului')}});
+}
+
 const receiptSource = fs.readFileSync(path.join(root, 'OcrServer', 'ReceiptExtractor.swift'), 'utf8');
 const routeSource = fs.readFileSync(path.join(root, 'OcrServer', 'VaporServer.swift'), 'utf8');
 const chitantaSource = fs.readFileSync(path.join(root, 'OcrServer', 'ChitantaExtractor.swift'), 'utf8');
 const anafSource = fs.readFileSync(path.join(root, 'OcrServer', 'AnafValidator.swift'), 'utf8');
+const segmenterSource = fs.readFileSync(path.join(root, 'OcrServer', 'ReceiptSegmenterV2.swift'), 'utf8');
+const recognizerSource = fs.readFileSync(path.join(root, 'OcrServer', 'TextRecognizerPro.swift'), 'utf8');
 assert.match(receiptSource, /if vat\.rates\.isEmpty/,
   'nu se inventeaza o cota TVA cand procentul lipseste');
 assert.equal(receiptSource.includes('CAPITAL\\\\s+SOCIAL'), true,
   'capitalul social este exclus din sume');
-assert.match(routeSource, /ReceiptSegmenterV2\.segment\(firstClean\)/,
-  're-OCR-ul trebuie urmat de a doua segmentare');
-assert.match(routeSource, /TextRecognizerPro\.deduplicate\(refinedCandidates\)/,
-  'documentele rafinate trebuie deduplicate din nou');
-assert.match(routeSource, /expandHorizontally: !hasHorizontalNeighbor/,
-  'blocurile laterale ale unei chitante singure trebuie recuperate');
-assert.match(routeSource, /expandDownward: needsLowerRecovery && !hasVerticalNeighborBelow/,
-  'corpul slab de sub ultimul antet din coloana trebuie recuperat');
-assert.match(routeSource, /shouldAcceptRefinedSplit/,
-  'a doua segmentare trebuie acceptata doar pentru documente autonome');
+assert.match(segmenterSource, /splitSideBySideDocuments/,
+  'bonurile alaturate trebuie separate o singura data, la detectia initiala');
+assert.match(routeSource, /func isolatedCell\(for index: Int\)/,
+  'fiecare document trebuie sa primeasca o celula OCR izolata de vecini');
+assert.match(routeSource, /finalDetections\.reserveCapacity\(detections\.count\)/,
+  'numarul documentelor finale trebuie sa porneasca din numarul detectiilor fizice');
+assert.match(routeSource, /for \(detIndex, det\) in detections\.enumerated\(\)/,
+  'fiecare detectie fizica trebuie procesata exact o data');
+assert.match(recognizerSource, /mapRectFromBase/,
+  'celula izolata trebuie transformata corect in orice orientare OCR');
+assert.match(recognizerSource, /cropRect requestedRect: CGRect[\s\S]*fallbackBoxes/,
+  're-OCR-ul trebuie sa accepte dreptunghiul sigur si fallback-ul primei citiri');
+assert.doesNotMatch(routeSource, /ReceiptSegmenterV2\.segment\(firstClean\)/,
+  're-OCR-ul nu mai are voie sa fragmenteze din nou acelasi document');
+assert.doesNotMatch(routeSource, /deduplicate\(refinedCandidates\)/,
+  'deduplicarea dupa crop nu mai are voie sa elimine documente reale');
+assert.doesNotMatch(routeSource, /expandDownward:/,
+  'un crop nu se mai extinde liber in documentul de dedesubt');
 assert.match(routeSource, /vatAmounts\.reduce\(0, \+\)/,
   'TVA-ul cotelor multiple trebuie agregat');
 assert.match(routeSource, /handwritingPass\(\s*on: rotImg,\s*clusterBoxes: clean\)/,
