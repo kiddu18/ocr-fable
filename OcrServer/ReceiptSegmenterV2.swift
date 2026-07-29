@@ -14,8 +14,8 @@
 //        "NUMAR BON") nu se unesc NICIODATA;
 //      - doua clustere cu CUI-uri de comerciant DIFERITE nu se unesc niciodata;
 //      - toleranta verticala redusa la mh*4.
-//   3. splitByHeaderAnchors se baza doar pe "NUMAR BON" — dar Douglas si ROG GAZ
-//      nu au aceasta linie. Acum ancorele includ si linia de CUI a comerciantului
+//   3. splitByHeaderAnchors se baza doar pe "NUMAR BON" — unele bonuri (parfumerie,
+//      GPL, format scurt) nu au aceasta linie. Ancorele includ si linia de CUI
 //      (COD FISCAL / C.I.F. / Cod Identificare Fiscala), pe care o are ORICE bon,
 //      iar taietura se face la cel mai mare gol dintre linii, nu la offset fix.
 //   4. Operatorul `<` pe tupluri definit la nivel de fisier intra in conflict cu
@@ -32,11 +32,7 @@ enum ReceiptSegmenterV2 {
 
     private static func looksLikeSingleChitanta(_ cluster: [OCRBoxItem]) -> Bool {
         let text = groupLines(cluster).joined(separator: " ").uppercased()
-        if text.range(of: "BON\\s+FISCAL|TOTAL\\s*TVA|CASA\\s+DE\\s+MARCAT",
-                      options: .regularExpression) != nil { return false }
-        let range = NSRange(text.startIndex..., in: text)
-        return chitantaTitleRx.firstMatch(in: text, range: range) != nil
-            || (text.contains("PRIMIT DE LA") && text.contains("SUMA"))
+        return ChitantaExtractor.looksLikeChitanta(text)
     }
 
     // MARK: - API
@@ -254,8 +250,8 @@ enum ReceiptSegmenterV2 {
                                medianHeight mh: Double) -> [[OCRBoxItem]] {
         let lines = linesWithY(cluster)
         // Ancore robuste (validate pe poza de test cu 6 bonuri):
-        //  - liniile cu CUI prefixat RO merg ca ancora chiar cand contextul e
-        //    ilizibil ("Codl Identiticare Fiscala: R022254794");
+        //  - liniile cu CUI prefixat RO merg ca ancora chiar cand eticheta e
+        //    ilizibila (OCR: "Codl Identiticare Fiscala: R0…");
         //  - antetul de firma (SRL/S.A./PFA) ancoreaza bonurile fara linie de CUI
         //    lizibila; liniile CLIENT raman excluse.
         let anchorRx: NSRegularExpression

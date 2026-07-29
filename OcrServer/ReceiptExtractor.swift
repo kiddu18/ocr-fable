@@ -110,7 +110,7 @@ enum RoCUI {
 
     /// Confuzii OCR frecvente pe fonturi de imprimanta termica.
     static func repairOCRDigits(_ s: String) -> String {
-        let subs: [Character: Character] = ["O": "0", "Q": "0", "D": "0", "I": "1", "L": "1",
+        let subs: [Character: Character] = ["O": "0", "Q": "0", "D": "0", "P": "0", "I": "1", "L": "1",
                                             "|": "1", "Z": "2", "S": "5", "B": "8", "G": "6",
                                             "@": "0"]
         return String(s.uppercased().map { subs[$0] ?? $0 })
@@ -125,8 +125,9 @@ enum RoCUI {
         -> (best: String?, raw: String?, checksumOK: Bool, candidates: [String]) {
 
         let buyerRx = try! NSRegularExpression(pattern: "CLIENT|CUMPARATOR|BENEF|CNP")
+        // COD IDENTIFICARE / IDENTITICARE (OCR) FISCALA; C.I.F.; CUI; prefix RO
         let ctxRx = try! NSRegularExpression(
-            pattern: "(?:COD\\s*FISCAL|COD\\s*IDENTIFICARE\\s*FISCALA|C\\.?\\s*[I1]\\.?\\s*F|\\bC\\.?\\s*F\\b|\\bCUI\\b)\\s*[.:]?\\s*(?:R[O0Q])?\\s*[.:]?\\s*([A-Z0-9@]{4,10})|\\bR[O0]\\s?([0-9OQDILSZB@]{4,10})\\b",
+            pattern: "(?:COD\\s*FISC[A-Z]*|COD\\s*IDENT[A-Z]{0,8}\\s*FISC[A-Z]*|C\\.?\\s*[I1]\\.?\\s*F|\\bC\\.?\\s*F\\b|\\bCUI\\b)\\s*[.:]?\\s*(?:R(?:[O0Q]|[^A-Z0-9@]{0,3}))?\\s*[.:]?\\s*([A-Z0-9@]{4,12})|\\bR[O0]\\s?([0-9OQDILSZB@]{4,12})\\b",
             options: [.caseInsensitive])
 
         var raw: [String] = []
@@ -143,27 +144,38 @@ enum RoCUI {
 
         // Captura poate inghiti prefixul "RO" ("C.I.F.: RO17827267" -> "RO17827267"),
         // iar repararea O->0 ar produce un fals "017827267". Eliminam prefixul.
-        raw = raw.map { tok -> String in
+        // OCR pe termic: "RO" citit "R0" + CUI cu zero in fata (ex. R0 + 0XXXXXXXX).
+        func normalizeDigits(_ tok: String) -> String {
             var t = tok
             if t.count > 2, t.first == "R" {
                 let second = t[t.index(after: t.startIndex)]
                 if second == "O" || second == "0" || second == "Q" { t.removeFirst(2) }
             }
-            return t
+            var d = String(repairOCRDigits(t).filter { $0.isNumber })
+            while d.count > 4, d.first == "0" { d.removeFirst() }
+            return d
         }
 
         // 1) checksum direct
         for c in raw {
-            let d = String(repairOCRDigits(c).filter { $0.isNumber })
+            let d = normalizeDigits(c)
             if isValid(d), d != buyerCui { return (d, c, true, [d]) }
         }
 
         // 2) reparare ghidata de checksum -> candidati pentru batch-ul ANAF
         var candidates: [String] = []
         for c in raw {
-            let d = String(repairOCRDigits(c).filter { $0.isNumber })
+            let d = normalizeDigits(c)
             guard d.count >= 4 else { continue }
+            if isValid(d) { candidates.append(d) }
             for x in "0123456789" where isValid(d + String(x)) { candidates.append(d + String(x)) }
+            // trunchiere o cifra din fata/spate (zero in plus din OCR)
+            if d.count > 4 {
+                let dropFirst = String(d.dropFirst())
+                if isValid(dropFirst) { candidates.append(dropFirst) }
+                let dropLast = String(d.dropLast())
+                if isValid(dropLast) { candidates.append(dropLast) }
+            }
             let chars = Array(d)
             for pos in 0..<chars.count {
                 for x in "0123456789" where chars[pos] != x {
@@ -296,30 +308,77 @@ enum ReceiptExtractor {
         // --- sume
         let allAmounts = lines.flatMap { FinExtract.amounts(in: $0) }
         let directTotal = totalAmount(lines)
-        let articlesTotal = directTotal == nil ? itemizedTotal(lines) : nil
-        let totalOCR = directTotal ?? articlesTotal
-        if articlesTotal != nil {
+        let articlesTotal = itemizedTotal(lines)
+        let productTotal = productLineTotal(lines)
+        // Alege totalul: prefera valoarea de pe TOTAL daca e consistenta cu TVA;
+        // altfel articole / linie de produs / combustibil.
+        var totalOCR = directTotal ?? articlesTotal ?? productTotal
+        var totalSourceHint: String? = nil
+        if directTotal == nil, articlesTotal != nil {
+            totalSourceHint = "derivat_din_articole"
             warnings.append("Totalul a fost reconstruit din randurile articolelor deoarece valoarea de langa TOTAL nu a fost citita.")
+        } else if directTotal == nil, productTotal != nil {
+            totalSourceHint = "derivat_din_articole"
         }
-        let vat = vatInfo(lines, docDate: docDate)
-        warnings.append(contentsOf: vat.warnings)
-        let mainRate = vat.rates.first ?? RoVAT.validRates(documentDate: docDate).first ?? 21
+
+        let vatRaw = vatInfo(lines, docDate: docDate)
+        warnings.append(contentsOf: vatRaw.warnings)
+        var vatRates = vatRaw.rates
+        var vatAmounts = vatRaw.amounts
+
+        // Daca avem TOTAL TVA dar nu cota, folosim cota legala la data documentului.
+        if vatRates.isEmpty, !vatAmounts.isEmpty {
+            let defaultRate = RoVAT.validRates(documentDate: docDate).first ?? 21
+            vatRates = [defaultRate]
+            warnings.append("Cota TVA nu a fost citita explicit; folosita cota legala \(Int(defaultRate))% la data documentului.")
+        } else if vatRates.isEmpty, totalOCR != nil {
+            // Bonurile fiscale RO au aproape mereu o cota; pe termice eticheta
+            // "21,00 %" se pierde des. Calculam TVA din total cu cota legala.
+            let defaultRate = RoVAT.validRates(documentDate: docDate).first ?? 21
+            vatRates = [defaultRate]
+            warnings.append("Cota TVA lipsa din OCR; TVA calculat cu cota legala \(Int(defaultRate))%.")
+        }
+
+        let mainRate = vatRates.first ?? RoVAT.validRates(documentDate: docDate).first ?? 21
+
+        // Cand TOTAL OCR (ex. 188,75) nu bate cu TVA, dar exista o suma pe
+        // linia de produs (180,75 B) sau litri x pret, o preferam.
+        if let t = totalOCR, let v = vatAmounts.first {
+            let expected = (v * (100 + mainRate) / mainRate).ron2
+            if abs(t - expected) > 0.10 {
+                if let p = productTotal, abs(p - expected) <= 0.10 {
+                    totalOCR = p
+                    totalSourceHint = "derivat_din_tva"
+                    warnings.append("Total corectat din linia de produs: \(t) -> \(p) (consistent cu TVA).")
+                } else if let match = allAmounts.first(where: { abs($0 - expected) <= 0.06 }) {
+                    totalOCR = match
+                    totalSourceHint = "derivat_din_tva"
+                    warnings.append("Total corectat matematic din TVA: \(t) -> \(match).")
+                }
+            }
+        }
+        // Articolele (Douglas) castiga cand TOTAL e gol sau e un procent (21,00).
+        if let a = articlesTotal {
+            let looksLikeRate = totalOCR.map { [5.0, 9.0, 11.0, 19.0, 21.0].contains($0) } ?? true
+            if totalOCR == nil || looksLikeRate {
+                totalOCR = a
+                totalSourceHint = "derivat_din_articole"
+            }
+        }
 
         // linii TVA (suporta cote multiple pe acelasi bon, ex. restaurant 11% + 21%)
-        if vat.rates.isEmpty {
-            // Nu presupunem automat cota curenta. Un procent lipsa din OCR nu
-            // trebuie sa transforme totalul sau alta suma intr-un TVA inventat.
+        if vatRates.isEmpty {
             r.total = totalOCR
-            r.totalSource = totalOCR == nil ? "lipsa" : "ocr"
+            r.totalSource = totalOCR == nil ? "lipsa" : (totalSourceHint ?? "ocr")
             r.mathVerified = false
             r.vatLines = []
-            warnings.append("Cota TVA nu a fost citita explicit; TVA-ul nu a fost calculat automat.")
-        } else if vat.rates.count > 1 && vat.rates.count == vat.amounts.count {
-            r.vatLines = zip(vat.rates, vat.amounts).map { (rate, amt) in
+            warnings.append("Cota TVA nu a putut fi stabilita; TVA-ul nu a fost calculat.")
+        } else if vatRates.count > 1 && vatRates.count == vatAmounts.count {
+            r.vatLines = zip(vatRates, vatAmounts).map { (rate, amt) in
                 VatLineDTO(rate: rate, amount: amt, base: (amt * 100 / rate).ron2)
             }
             r.total = totalOCR
-            r.totalSource = totalOCR == nil ? "lipsa" : "ocr"
+            r.totalSource = totalOCR == nil ? "lipsa" : (totalSourceHint ?? "ocr")
             if let total = totalOCR {
                 let reconstructed = r.vatLines.reduce(0.0) {
                     $0 + ($1.base ?? 0) + ($1.amount ?? 0)
@@ -330,28 +389,54 @@ enum ReceiptExtractor {
                 }
             }
         } else {
-            let rec = FinExtract.reconcile(total: totalOCR, vat: vat.amounts.first,
+            let rec = FinExtract.reconcile(total: totalOCR, vat: vatAmounts.first,
                                            rate: mainRate, allAmountsOnReceipt: allAmounts)
             r.total = rec.total
-            r.totalSource = rec.source
+            r.totalSource = totalSourceHint ?? rec.source
             r.mathVerified = rec.verified
             if let w = rec.warning { warnings.append(w) }
             let amt = rec.vat
             let base = (r.total != nil && amt != nil) ? (r.total! - amt!).ron2 : nil
             r.vatLines = [VatLineDTO(rate: mainRate, amount: amt, base: base)]
         }
-        if articlesTotal != nil, r.total != nil { r.totalSource = "derivat_din_articole" }
+        if totalSourceHint == "derivat_din_articole", r.total != nil {
+            r.totalSource = "derivat_din_articole"
+        }
 
-        // --- carburant: litri x pret unitar, cross-check cu totalul
+        // --- carburant: litri x pret unitar — poate CORECTA totalul gresit (ex. 140,20 vs 146,26)
         let f = fuel(lines)
         r.fuelLiters = f.liters
         r.fuelUnitPrice = f.price
         r.productHint = f.product
-        if let l = f.liters, let p = f.price, let t = r.total {
-            if abs(l * p - t) <= 0.06 {
-                r.mathVerified = true
-            } else if abs(l * p - t) > 1.0 {
-                warnings.append("Litri x pret unitar (\((l * p).ron2)) nu bate cu totalul (\(t)).")
+        if let l = f.liters, let p = f.price {
+            let fuelTotal = (l * p).ron2
+            if let t = r.total {
+                if abs(fuelTotal - t) <= 0.06 {
+                    r.mathVerified = true
+                } else if abs(fuelTotal - t) > 0.50,
+                          allAmounts.contains(where: { abs($0 - fuelTotal) <= 0.06 })
+                            || abs(fuelTotal - (productTotal ?? -1)) <= 0.06 {
+                    warnings.append("Total corectat din litri x pret: \(t) -> \(fuelTotal).")
+                    r.total = fuelTotal
+                    r.totalSource = "derivat_din_articole"
+                    if let rate = r.vatLines.first?.rate {
+                        let vCalc = (fuelTotal * rate / (100 + rate)).ron2
+                        r.vatLines = [VatLineDTO(rate: rate, amount: vCalc,
+                                                 base: (fuelTotal - vCalc).ron2)]
+                        r.mathVerified = true
+                    }
+                } else if abs(fuelTotal - t) > 1.0 {
+                    warnings.append("Litri x pret unitar (\(fuelTotal)) nu bate cu totalul (\(t)).")
+                }
+            } else if fuelTotal > 0 {
+                r.total = fuelTotal
+                r.totalSource = "derivat_din_articole"
+                if let rate = r.vatLines.first?.rate ?? vatRates.first {
+                    let vCalc = (fuelTotal * rate / (100 + rate)).ron2
+                    r.vatLines = [VatLineDTO(rate: rate, amount: vCalc,
+                                             base: (fuelTotal - vCalc).ron2)]
+                    r.mathVerified = true
+                }
             }
         }
 
@@ -463,40 +548,61 @@ enum ReceiptExtractor {
         return lines.first?.trimmingCharacters(in: .whitespaces)
     }
 
+    private static let rateValues: Set<Double> = [5, 9, 11, 19, 21]
+
     private static func totalAmount(_ lines: [String]) -> Double? {
         let rx = try! NSRegularExpression(pattern: "(?<!SUB)\\bTOTAL\\b(?!\\s*TVA)",
                                           options: [.caseInsensitive])
         let rejected = try! NSRegularExpression(
-            pattern: "SUBTOTAL|TOTAL\\s*TVA|TVA\\s*TOTAL|SUMA\\s*TVA|COTA\\s*TVA|REST|RULAJ",
+            pattern: "SUBTOTAL|TOTAL\\s*TVA|TVA\\s*TOTAL|IOTAL\\s*TVA|SUMA\\s*TVA|COTA\\s*TVA|REST|RULAJ|TOTALTVA",
             options: [.caseInsensitive])
+        let inlineRx = try! NSRegularExpression(
+            pattern: "(?<!SUB)\\bTOTAL\\b(?!\\s*TVA)\\s*[:=]?\\s*(\\d{1,5})\\s?[.,]\\s?(\\d{2})(?!\\s*%)",
+            options: [.caseInsensitive])
+
+        func isPlausibleTotal(_ v: Double) -> Bool {
+            v >= 0.50 && v <= 99999 && !rateValues.contains(v)
+        }
+
+        for line in lines {
+            let r = NSRange(line.startIndex..., in: line)
+            if rejected.firstMatch(in: line, range: r) != nil { continue }
+            if let m = inlineRx.firstMatch(in: line, range: r) {
+                let ns = line as NSString
+                if let v = Double("\(ns.substring(with: m.range(at: 1))).\(ns.substring(with: m.range(at: 2)))"),
+                   isPlausibleTotal(v) { return v }
+            }
+        }
         for (i, line) in lines.enumerated() {
             let r = NSRange(line.startIndex..., in: line)
             if rejected.firstMatch(in: line, range: r) != nil { continue }
             guard rx.firstMatch(in: line, range: r) != nil else { continue }
-            if let amt = FinExtract.amounts(in: line).first { return amt }
-            // eticheta si suma pot pica pe linii OCR diferite
-            for next in lines.dropFirst(i + 1).prefix(2) {
+            let onLine = FinExtract.amounts(in: line).filter(isPlausibleTotal)
+            if let amt = onLine.max() { return amt }
+            for next in lines.dropFirst(i + 1).prefix(3) {
                 let nr = NSRange(next.startIndex..., in: next)
                 if rejected.firstMatch(in: next, range: nr) != nil { continue }
-                if let amt = FinExtract.amounts(in: next).first { return amt }
+                if next.range(of: "%|COTA|TVA\\s*[A-E]", options: [.regularExpression, .caseInsensitive]) != nil {
+                    continue
+                }
+                let amts = FinExtract.amounts(in: next).filter(isPlausibleTotal)
+                if let amt = amts.max() { return amt }
             }
         }
         return nil
     }
 
-    /// Fallback universal pentru bonuri la care Vision citeste eticheta TOTAL,
-    /// dar pierde valoarea: adunam doar randurile finale de articol marcate cu
-    /// grupa fiscala A-E si scadem reducerile. Randurile "1 BUC x pret" nu au
-    /// grupa la final si nu sunt numarate de doua ori.
+    /// Fallback: aduna randurile de articol cu grupa fiscala A-E (Douglas etc.).
     private static func itemizedTotal(_ lines: [String]) -> Double? {
         let full = lines.joined(separator: " ").uppercased()
-        guard full.range(of: "\\bTOTAL\\b|SUBTOTAL", options: .regularExpression) != nil else {
+        guard full.range(of: "\\bTOTAL\\b|SUBTOTAL|TOTALTVA|\\bBF\\b", options: .regularExpression) != nil
+                || full.range(of: "\\b[A-E]\\b") != nil else {
             return nil
         }
         let fiscalRow = try! NSRegularExpression(
             pattern: "(?:^|\\s|-)\\b[A-E]\\b\\s*$", options: [.caseInsensitive])
         let excluded = try! NSRegularExpression(
-            pattern: "TOTAL|SUBTOTAL|TVA|CARD|CASH|NUMERAR|REST|RULAJ",
+            pattern: "\\bTOTAL\\b|SUBTOTAL|\\bTVA\\b|CARD|CASH|NUMERAR|REST|RULAJ|COTA",
             options: [.caseInsensitive])
         var values: [Double] = []
         for line in lines {
@@ -504,9 +610,10 @@ enum ReceiptExtractor {
             guard fiscalRow.firstMatch(in: line, range: range) != nil,
                   excluded.firstMatch(in: line, range: range) == nil,
                   let value = FinExtract.amounts(in: line).last else { continue }
+            if rateValues.contains(value) { continue }
             let upper = line.uppercased()
             let negative = upper.range(
-                of: "DISCOUNT|REDUCERE|RABAT|\\d[.,]\\d{2}\\s*-\\s*[A-E]\\s*$",
+                of: "DISCOUNT|REDUCERE|RABAT|\\d[.,]\\d{2}\\s*-\\s*[A-E]\\s*$|\\d[.,]\\d{2}-[A-E]\\s*$",
                 options: .regularExpression) != nil
             values.append(negative ? -value : value)
         }
@@ -515,59 +622,93 @@ enum ReceiptExtractor {
         return total > 0 ? total : nil
     }
 
+    /// Linia de produs: "4,04 X44,74 LITRU 180,75 B" / "GPL 35.5 L X 4.12 146.26 G"
+    private static func productLineTotal(_ lines: [String]) -> Double? {
+        let rx = try! NSRegularExpression(
+            pattern: "(\\d{1,5})[.,](\\d{2})\\s*[A-G]\\s*$", options: [.caseInsensitive])
+        let productHint = try! NSRegularExpression(
+            pattern: "LITRU|\\bL\\b|GPL|MOTORINA|BENZINA|X\\s*\\d|BUC|\\d\\s*[Xx×]",
+            options: [.caseInsensitive])
+        var found: [Double] = []
+        for line in lines {
+            let range = NSRange(line.startIndex..., in: line)
+            if line.uppercased().range(of: "TOTAL|TVA|CARD|REST|COTA|SUBTOTAL",
+                                       options: .regularExpression) != nil { continue }
+            guard productHint.firstMatch(in: line, range: range) != nil
+                    || rx.firstMatch(in: line, range: range) != nil,
+                  let m = rx.firstMatch(in: line, range: range) else { continue }
+            let ns = line as NSString
+            if let v = Double("\(ns.substring(with: m.range(at: 1))).\(ns.substring(with: m.range(at: 2)))"),
+               !rateValues.contains(v), v >= 1 {
+                found.append(v)
+            }
+        }
+        return found.max()
+    }
+
     private static func vatInfo(_ lines: [String], docDate: Date?)
         -> (rates: [Double], amounts: [Double], warnings: [String]) {
         var rates: [Double] = []
         var amounts: [Double] = []
         var warnings: [String] = []
         let rateRx = try! NSRegularExpression(
-            pattern: "(?:COTA\\s*)?TVA\\s*[A-E]?\\s*[=:]?\\s*(\\d{1,2})(?:[.,]\\d{1,2})?\\s*%",
+            pattern: "(?:COTA\\s*)?(?:TOTAL\\s*)?TVA\\s*[A-E]?\\s*[=:]?\\s*(\\d{1,2})(?:[.,]\\d{1,2})?\\s*[%X×x]",
             options: [.caseInsensitive])
-        let tvaAmountRx = try! NSRegularExpression(pattern: "TOTAL\\s*TVA|TVA\\s*TOTAL",
-                                                   options: [.caseInsensitive])
-        // Perechi cota -> suma cand ambele stau pe ACEEASI linie. Daca Vision
-        // uneste doua randuri, asociem listele in ordinea spatiala a textului.
-        // (farmacii/supermarketuri: "SUMA TVA A 21%   7,01" / "SUMA TVA B 11%   37,66")
+        let rateBareRx = try! NSRegularExpression(
+            pattern: "\\b(\\d{1,2})[.,]00\\s*%", options: [.caseInsensitive])
+        let tvaAmountRx = try! NSRegularExpression(
+            pattern: "TOTAL\\s*TVA|TVA\\s*TOTAL|IOTAL\\s*TVA|TOTALTVA|SUMA\\s*TVA",
+            options: [.caseInsensitive])
         var pairs: [(rate: Double, amount: Double)] = []
         for line in lines {
             let r = NSRange(line.startIndex..., in: line)
             let ns = line as NSString
-            let lineRates = rateRx.matches(in: line, range: r).compactMap { m -> Double? in
+            var lineRates = rateRx.matches(in: line, range: r).compactMap { m -> Double? in
                 Double(ns.substring(with: m.range(at: 1)))
             }.filter { $0 > 0 && $0 < 100 }
+            if lineRates.isEmpty {
+                lineRates = rateBareRx.matches(in: line, range: r).compactMap { m -> Double? in
+                    Double(ns.substring(with: m.range(at: 1)))
+                }.filter { rateValues.contains($0) }
+            }
             let lineAmounts = FinExtract.amountRegex.matches(in: line, range: r).compactMap { m -> Double? in
                 let whole = ns.substring(with: m.range(at: 1))
                 let fraction = ns.substring(with: m.range(at: 2))
                 return Double("\(whole).\(fraction)")
-            }
+            }.filter { !rateValues.contains($0) }
             for v in lineRates {
                 if !rates.contains(v) {
                     rates.append(v)
                     if let w = RoVAT.warningForRate(v, documentDate: docDate) { warnings.append(w) }
                 }
             }
-            if lineRates.count == lineAmounts.count && !lineRates.isEmpty {
-                for (v, amt) in zip(lineRates, lineAmounts)
-                    where abs(amt - v) > 0.001 && !pairs.contains(where: { $0.rate == v }) {
+            if lineRates.count >= 1, lineAmounts.count >= 1 {
+                if lineRates.count == lineAmounts.count {
+                    for (v, amt) in zip(lineRates, lineAmounts)
+                        where !pairs.contains(where: { $0.rate == v }) {
+                        pairs.append((v, amt))
+                    }
+                } else if lineRates.count == 1, let v = lineRates.first, let amt = lineAmounts.last,
+                          !pairs.contains(where: { $0.rate == v }) {
                     pairs.append((v, amt))
                 }
-            } else if lineRates.count == 1, let v = lineRates.first,
-                      !line.uppercased().contains("TOTAL"), let amt = lineAmounts.last,
-                      abs(amt - v) > 0.001, !pairs.contains(where: { $0.rate == v }) {
-                pairs.append((v, amt))
             }
             if tvaAmountRx.firstMatch(in: line, range: r) != nil {
-                // blacklist-ul nu se aplica aici: linia e explicit "TOTAL TVA"
                 for m in FinExtract.amountRegex.matches(in: line, range: r) {
                     let i = ns.substring(with: m.range(at: 1))
                     let f = ns.substring(with: m.range(at: 2))
-                    if let v = Double("\(i).\(f)"), !amounts.contains(v) { amounts.append(v) }
+                    if let v = Double("\(i).\(f)"), !rateValues.contains(v), !amounts.contains(v) {
+                        amounts.append(v)
+                    }
                 }
             }
         }
-        // cand avem perechi pe >=2 cote, ele sunt sursa de adevar (aliniate corect)
         if pairs.count >= 2 {
             return (pairs.map { $0.rate }, pairs.map { $0.amount }, warnings)
+        }
+        if pairs.count == 1, amounts.isEmpty {
+            amounts = [pairs[0].amount]
+            if rates.isEmpty { rates = [pairs[0].rate] }
         }
         return (rates, amounts, warnings)
     }

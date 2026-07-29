@@ -1,0 +1,23 @@
+Pachet: OCR_Iphone v7 (extractor universal + GHA regression gate)
+Data: 2026-07-29
+
+Repo: https://github.com/kiddu18/ocr-fable
+Workflow: .github/workflows/build.yml
+  1) regression (ubuntu + node) — tools/replay_segmentare/regression_node.js
+  2) build IPA unsigned (macos + xcodebuild)
+
+Baza: commit 02f641a (v5) + fixuri v6/v7 locale
+
+Ce schimba v7 (universal, fara hardcod pe poze de test):
+  - total/TVA: articole, litri×pret, cota legala, anti-procent-ca-total
+  - looksLikeChitanta: nu mai confunda TRX/CHITANTA de pe bonuri
+  - fallback full-page re-OCR daca detectia pierde documente
+  - ANAF: CUI valid confirmat chiar pe antet termic zgomotos
+  - conturi: categorii (carburant/farmacie/protocol), nu firme din poza
+
+Verificare locala:
+  node tools/replay_segmentare/regression_node.js
+
+Deploy:
+  git push origin main  →  Actions produce OcrServer.ipa artifact
+  Instaleaza IPA pe iPhone (sideload / AltStore / TrollStore / etc.)

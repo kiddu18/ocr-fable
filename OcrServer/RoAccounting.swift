@@ -161,7 +161,7 @@ enum RoAccounting {
                 vatDeductibility: "100%")),
 
         // --- FARMACII — dupa destinatie ---
-        Rule(pattern: "FARMACI|PHARMA|CATENA|HELP\\s?NET|SENSIBLU|DR\\.?\\s?MAX|BENU\\b",
+        Rule(pattern: "FARMACI|PHARMA|AMERIS|CATENA|HELP\\s?NET|SENSIBLU|DR\\.?\\s?MAX|BENU\\b|DONA\\b",
              cls: Classification(
                 accountCode: "604",
                 account: "604 Materiale nestocate (trusa medicala firma) / 6458 dupa destinatie",

@@ -95,6 +95,9 @@ enum RoNumberWords {
         let map: [Character: Character] = ["ă": "a", "â": "a", "î": "i", "ș": "s", "ş": "s", "ț": "t", "ţ": "t"]
         s = String(s.map { map[$0] ?? $0 })
         s = s.replacingOccurrences(of: "[^a-z0-9]", with: "", options: .regularExpression)
+        // Pe formulare carbon, i-ul final din "lei" este citit des t/l.
+        s = s.replacingOccurrences(of: "let", with: "lei")
+            .replacingOccurrences(of: "lel", with: "lei")
         guard !s.isEmpty else { return nil }
 
         // bani (zecimale): "...leisicincizecibani" / "...si50bani"
@@ -191,20 +194,43 @@ enum RoCNP {
 enum ChitantaExtractor {
 
     /// Un document e chitanta (nu bon fiscal) daca are "CHITANTA" si NU are
-    /// markerii de casa de marcat.
+    /// markerii de casa de marcat. "ID TRX/CHITANTA" de pe bonuri NU e formular.
     static func looksLikeChitanta(_ text: String) -> Bool {
         let t = normalize(text)
-        if t.contains("BON FISCAL") || t.contains("TOTAL TVA") || t.contains("CASA DE MARCAT") {
+        // Bon fiscal / casa de marcat / carburant: NICIODATA chitanta de mana.
+        if t.range(of: "BON\\s*FISCAL|TOTAL\\s*TVA|CASA\\s+DE\\s+MARCAT|NUMAR\\s*BON|AMEF|EJTRZ|\\bUNPIR\\b",
+                   options: .regularExpression) != nil {
             return false
         }
-        let title = t.range(of: "\\bCH[I1L][T7L][A-Z]{3,}\\b", options: .regularExpression) != nil
-        let formEvidence = t.range(of: "(?:SERIE|SERIA|SERIC)\\s*[/\\-]?\\s*(?:NUMAR|NWUAR|NOMAR|TOMNAR|NOUAR|NHONAR|ANAR)",
+        if t.range(of: "MOTORINA|BENZINA|\\bGPL\\b|DIESEL|ADBLUE|SKID\\s*GPL",
+                   options: .regularExpression) != nil {
+            return false
+        }
+        if t.range(of: "TRX\\s*/\\s*CHITANTA|ID\\s*TRX\\s*/\\s*CH",
+                   options: .regularExpression) != nil {
+            return false
+        }
+        // Titlu de formular: CHITANTA, nu tokeni din mijlocul altor cuvinte.
+        let title = t.range(
+            of: "(?:^|\\s)CH[I1L][T7L][A-ZĂÂÎȘȚ]{3,}(?:\\s|$)|(?:^|\\s)CHITAN[TȚ]A(?:\\s|$)",
+            options: .regularExpression) != nil
+        // Pe formulare carbon/scanari slabe, prima litera dispare frecvent
+        // ("HITANDA" din CHITANTA). Forma degradata se accepta numai cu dovezi.
+        let degradedTitle = t.range(
+            of: "(?:^|\\s)H[I1L][T7L][A-Z]{3,}(?:\\s|$)", options: .regularExpression) != nil
+        let formEvidence = t.range(of: "(?:SERIE|SERIA|SERIC)\\s*[/\\-]?\\s*(?:NUMAR|NWUAR|NOMAR|TOMNAR|NOUAR|NHONAR|SRONAR|ANAR)",
                                    options: .regularExpression) != nil
-            || (t.contains("PRIMIT DE LA") && t.contains("SUMA"))
+            || t.range(of: "(?:AM\\s*)?PR[I1U]M[I1U]T\\s+DE\\s+L[AE]", options: .regularExpression) != nil
+        let amountEvidence = t.range(of: "\\bSU[MN](?:A|K|KI|AI)\\b", options: .regularExpression) != nil
         let courierEvidence = t.range(
             of: "CHITANTA\\s+RAMBURS|RAMBURS\\s+CONT\\s+COLECTOR|SERIA\\s+RAMB",
             options: .regularExpression) != nil
-        return title || formEvidence || courierEvidence
+        // Titlul singur nu mai e suficient: pe bonuri termice "CHITANTA" apare
+        // in etichete de tranzactie. Cerem dovezi de formular SAU curier.
+        return courierEvidence
+            || (title && (formEvidence || amountEvidence))
+            || (formEvidence && amountEvidence)
+            || (degradedTitle && formEvidence && amountEvidence)
     }
 
     /// `linesText`   = linii din trecerea CU corectie lingvistica (text de mana)
@@ -219,7 +245,12 @@ enum ChitantaExtractor {
 
         // --- impartirea in zone: tot ce e DEASUPRA "Am primit de la" = emitentul
         func primitIndex(_ lines: [String]) -> Int {
-            lines.firstIndex { normalize($0).contains("PRIMIT DE LA") } ?? lines.count
+            lines.firstIndex { line in
+                let t = normalize(line)
+                return t.contains("PRIMIT DE LA")
+                    || t.range(of: "(?:AM\\s*)?PR[I1U]M[I1U]T\\s+DE\\s+L[AE]",
+                               options: .regularExpression) != nil
+            } ?? lines.count
         }
         let issuerLinesT = Array(linesText.prefix(primitIndex(linesText)))
         let issuerLinesD = Array(linesDigits.prefix(primitIndex(linesDigits)))
@@ -251,13 +282,13 @@ enum ChitantaExtractor {
             pattern: "REG\\.?\\s*COM|ORD\\.?\\s*REG|ADRES|CUI|CIF|C\\.?F\\.?|IBAN|CONT|TELEFON|TEL\\.?|FAX|CAPITAL|FACTUR",
             options: [.caseInsensitive])
         let seriesRx = try! NSRegularExpression(
-            pattern: "(?:SERIE|SERIA|SERIC)(?:\\s*[/\\-]\\s*(?:NUMAR|NWUAR|NOMAR|TOMNAR|NOUAR|NHONAR|ANAR))?\\s*[:#.\\-]*\\s*([A-Z]{1,8})(?=\\s|[.\\-/]|\\d|$)",
+            pattern: "(?:SERIE|SERIA|SERIC)(?:\\s*[/\\-]\\s*(?:NUMAR|NWUAR|NOMAR|TOMNAR|NOUAR|NHONAR|SRONAR|ANAR))?\\s*[:#.\\-]*\\s*([A-Z1]{1,8})(?=\\s|[.\\-/]|\\d|$)",
             options: [.caseInsensitive])
         let inlineSeriesRx = try! NSRegularExpression(
-            pattern: "(?:NUMAR|NWUAR|NOMAR|TOMNAR|NOUAR|NHONAR|ANAR)\\s*[:#.\\-]*\\s*([A-Z]{1,8})[., ]+\\d{1,16}",
+            pattern: "(?:NUMAR|NWUAR|NOMAR|TOMNAR|NOUAR|NHONAR|SRONAR|ANAR)\\s*[:#.\\-]*\\s*([A-Z1]{1,8})[., ]+\\d{1,16}",
             options: [.caseInsensitive])
         let explicitNumberRx = try! NSRegularExpression(
-            pattern: "(?:NUMAR|NWUAR|NOMAR|TOMNAR|NOUAR|NHONAR|ANAR)\\s*[:#.\\-]*\\s*(?:[A-Z]{1,8}[., ]*)?(\\d{1,16})",
+            pattern: "(?:NUMAR|NWUAR|NOMAR|TOMNAR|NOUAR|NHONAR|SRONAR|ANAR)\\s*[:#.\\-]*\\s*(?:[A-Z1]{1,8}[., ]*)?(\\d{1,16})",
             options: [.caseInsensitive])
         let seriesNumberRx = try! NSRegularExpression(
             pattern: "(?:SERIE|SERIA|SERIC)\\s*[:#.\\-]*\\s*[A-Z]{1,8}(?:\\s*[/.,-]\\s*|\\s+)(?:NR\\.?\\s*)?(\\d{1,16})",
@@ -275,6 +306,7 @@ enum ChitantaExtractor {
             if let m = seriesRx.firstMatch(in: up, range: range)
                 ?? inlineSeriesRx.firstMatch(in: up, range: range) {
                 r.serie = (up as NSString).substring(with: m.range(at: 1))
+                    .replacingOccurrences(of: "1", with: "I")
             }
         }
         for (rx, rejectNoise) in [(explicitNumberRx, false),
@@ -290,10 +322,31 @@ enum ChitantaExtractor {
                 }
             }
         }
+        // Prima trecere poate taia ultima cifra aflata la marginea campului.
+        // Acceptam completarea din OCR-ul focalizat numai daca acesta pastreaza
+        // integral prefixul brut si adauga exact o cifra; nu inlocuim un numar
+        // cu o ipoteza diferita de aceeasi lungime.
+        if let rawNumber = r.numar {
+            outer: for rx in [explicitNumberRx, seriesNumberRx, nrNumberRx] {
+                for line in linesFocused + linesText {
+                    let up = normalize(line)
+                    let range = NSRange(up.startIndex..., in: up)
+                    guard let m = rx.firstMatch(in: up, range: range),
+                          m.range(at: 1).location != NSNotFound else { continue }
+                    let candidate = (up as NSString).substring(with: m.range(at: 1))
+                    if candidate.count == rawNumber.count + 1,
+                       candidate.hasPrefix(rawNumber) {
+                        r.numar = candidate
+                        break outer
+                    }
+                }
+            }
+        }
         r.date = parseDate(linesDigits: linesFocused + linesDigits, linesText: linesText)
 
         // --- EMITENTUL (firma X, care a primit banii) — antetul tiparit
-        r.emitentNume = zone(after: ["UNITATEA", "ENTITATEA", "FURNIZOR", "SOCIETATEA"], in: issuerLinesT,
+        r.emitentNume = zone(after: ["UNITATEA", "ENTITATEA", "FURNIZOR", "SOCIETATEA"],
+                             in: issuerLinesD + issuerLinesT,
                              stopBefore: ["CUI", "CIF", "COD FISCAL", "NR", "ADRESA"])
         if r.emitentNume == nil {
             // fallback: prima linie din antet cu forma juridica, sarind peste "CHITANTA"
@@ -405,14 +458,14 @@ enum ChitantaExtractor {
             pattern: "(?<![A-Z0-9])([0-9OQDILZSEAGTBH]{1,5})\\s*(?:[.,+:]|\\s)\\s*([0-9OQDILZSEAGTBH]{2})(?![A-Z0-9])",
             options: [.caseInsensitive])
         let compactAmountRx = try! NSRegularExpression(
-            pattern: "\\bSUM(?:A|Ă|K|KI|AI)(?:\\s+DE)?[^0-9]{0,8}([0-9]{5,7})\\b",
+            pattern: "\\bSU[MN](?:A|Ă|K|KI|AI)(?:\\s+DE)?[^0-9]{0,8}([0-9]{5,7})\\b",
             options: [.caseInsensitive])
         func collectAmounts(_ lines: [String], allowCompact: Bool = false,
                             exact: inout [Double], repaired: inout [Double]) {
             for line in lines {
                 let up = normalize(line)
                 // Tolereaza confuzii OCR uzuale doar in zona etichetata "Suma".
-                guard up.range(of: "\\bSUM(?:A|Ă|K|KI|AI)\\b", options: .regularExpression) != nil else { continue }
+                guard up.range(of: "\\bSU[MN](?:A|Ă|K|KI|AI)\\b", options: .regularExpression) != nil else { continue }
                 exact.append(contentsOf: FinExtract.amounts(in: line))
                 let range = NSRange(up.startIndex..., in: up)
                 if allowCompact, let match = compactAmountRx.firstMatch(in: up, range: range) {
@@ -497,6 +550,12 @@ enum ChitantaExtractor {
         case let (c?, l?):
             if abs(c - l) < 0.01 {
                 r.suma = c; r.sumaConfirmata = true
+            } else if abs(c - l) <= 10.0 {
+                // O singura cifra OCR poate schimba semnificativ valoarea.
+                // Suma in litere este o observatie independenta; o preferam
+                // numai pentru o abatere limitata si pastram avertizarea.
+                r.suma = l
+                warnings.append("Suma in cifre (\(c)) difera de suma in litere (\(l)); folosita suma in litere, cu verificare manuala.")
             } else {
                 r.suma = c
                 warnings.append("Suma in cifre (\(c)) difera de suma in litere (\(l)) — chitanta trebuie verificata manual.")
@@ -586,14 +645,14 @@ enum ChitantaExtractor {
         let noise = try! NSRegularExpression(
             pattern: "FACTURA|FACT\\.|REPREZENT", options: [.caseInsensitive])
         let dateLike = try! NSRegularExpression(
-            pattern: "([0-9OQDILZSBGFH]{1,2})\\s*(?:[./-]|\\s+)\\s*([0-9OQDILZSBGFH]{1,2})\\s*(?:[./-]|\\s+)\\s*(2[0-9OQDILZSBGFH\\s]{3,6})",
+            pattern: "([0-9OQDILZSBGFH@]{1,2})\\s*(?:[./-]|\\s+)\\s*([0-9OQDILZSBGFH@]{1,2})\\s*(?:[./-]|\\s+)\\s*(2[0-9OQDILZSBGFH@\\s]{3,6})",
             options: [.caseInsensitive])
         let isoLike = try! NSRegularExpression(
             pattern: "(20\\d{2})[./-](\\d{1,2})[./-](\\d{1,2})")
 
         func repairedNumber(_ token: String) -> Int? {
             let map: [Character: Character] = [
-                "O": "0", "Q": "0", "D": "0", "I": "1", "L": "1",
+                "O": "0", "Q": "0", "D": "0", "@": "0", "I": "1", "L": "1",
                 "Z": "2", "E": "3", "A": "4", "H": "4", "S": "5",
                 "F": "5", "G": "6", "T": "7", "B": "8"
             ]
@@ -661,9 +720,11 @@ extension TextRecognizerPro {
         }
         let anchors = clusterBoxes.filter { word in
             let t = normalized(word.text)
-            return t.contains("SUM") || t.contains("DATA") || t.contains("SERI")
+            return t.contains("SUM") || t.contains("SUN")
+                || t.contains("DATA") || t.contains("SERI")
                 || t.contains("NUMAR") || t.contains("NOUAR") || t.contains("NHONAR")
-                || t.range(of: "^CH[I1L][T7L]", options: .regularExpression) != nil
+                || t.contains("SRONAR")
+                || t.range(of: "^(?:C?H)[I1L][T7L]", options: .regularExpression) != nil
                 || t == "NR" || t == "NR."
         }.sorted { $0.y < $1.y }
         guard !anchors.isEmpty else { return [] }
@@ -675,7 +736,7 @@ extension TextRecognizerPro {
         for anchor in anchors {
             let h = max(18, anchor.h)
             let anchorText = normalized(anchor.text)
-            let isTitle = anchorText.range(of: "^CH[I1L][T7L]",
+            let isTitle = anchorText.range(of: "^(?:C?H)[I1L][T7L]",
                                            options: .regularExpression) != nil
             let y = max(0, anchor.y - h * 1.8)
             let lowerReach = isTitle ? h * 12.0 : h * 2.2

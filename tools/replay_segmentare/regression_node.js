@@ -19,6 +19,25 @@ const bonuriFeedbackV4 = JSON.parse(fs.readFileSync(
 assert.equal(segment(bonuriFeedbackV4).length, 6,
   'feedback-ul v4 trebuie separat in exact 6 bonuri, fara fragmentare sau lipire');
 
+const bonuriFeedbackV5 = JSON.parse(fs.readFileSync(
+  path.join(__dirname, 'cases', 'bonuri_feedback_v5.txt'), 'utf8'));
+const bonuriV5Clusters = segment(bonuriFeedbackV5);
+assert.equal(bonuriV5Clusters.length, 6,
+  'cele 3 zone initiale din buildul v5 trebuie resegmentate la nivel de pagina in 6 bonuri');
+const douglasV5 = bonuriV5Clusters.find(c =>
+  groupLines(c).join(' ').toUpperCase().includes('DOUGLAS'));
+assert.ok(douglasV5, 'Douglas trebuie recuperat ca document autonom din zona compusa v5');
+const douglasV5Items = groupLines(douglasV5).filter(line =>
+  /(?:\s|-)\b[A-E]\b\s*$/i.test(line) && !/TOTAL|SUBTOTAL|TVA|CARD|REST/i.test(line));
+const douglasV5Total = douglasV5Items.reduce((sum, line) => {
+  const values = [...line.matchAll(/(?<![\p{L}\d%])(\d{1,5})\s?[.,]\s?(\d{2})(?![\p{L}\d])/gu)]
+    .map(m => Number(`${m[1]}.${m[2]}`));
+  const value = values.at(-1) || 0;
+  return sum + (/DISCOUNT|REDUCERE|RABAT|\d[.,]\d{2}\s*-\s*[A-E]\s*$/i.test(line) ? -value : value);
+}, 0);
+assert.equal(Math.round(douglasV5Total * 100) / 100, 613.10,
+  'Douglas v5 trebuie sa isi recupereze totalul din articolele propriului cluster');
+
 const bonClusters = segment(bonuri);
 const douglas = bonClusters.find(c => groupLines(c).join(' ').toUpperCase().includes('DOUGLAS'));
 assert.ok(douglas, 'bonul Douglas trebuie pastrat ca document distinct');
@@ -67,6 +86,31 @@ const fanText = groupLines(page2Clusters.find(c =>
   groupLines(c).join(' ').toUpperCase().includes('FAN COURIER'))).join(' ');
 assert.match(fanText, /SUMA\s+DE\s+387\s*[., ]\s*46/i,
   'suma FAN trebuie sa ramana in documentul FAN');
+
+const chitanteFeedbackV5 = JSON.parse(fs.readFileSync(
+  path.join(__dirname, 'cases', 'chitante_feedback_v5.txt'), 'utf8'));
+let pageBreakV5 = 1, largestResetV5 = -Infinity;
+for (let i = 1; i < chitanteFeedbackV5.length; i++) {
+  const reset = chitanteFeedbackV5[i - 1].y - chitanteFeedbackV5[i].y;
+  if (reset > largestResetV5) { largestResetV5 = reset; pageBreakV5 = i; }
+}
+const feedbackV5Page1 = segment(chitanteFeedbackV5.slice(0, pageBreakV5));
+const feedbackV5Page2 = segment(chitanteFeedbackV5.slice(pageBreakV5));
+assert.equal(feedbackV5Page1.length, 3,
+  'pagina 1 din feedback-ul v5 trebuie sa pastreze cele 3 chitante');
+assert.equal(feedbackV5Page2.length, 3,
+  'zona comuna FAN+DONA din feedback-ul v5 trebuie separata in doua documente');
+assert.ok(feedbackV5Page2.some(c => /FAN/i.test(groupLines(c).join(' '))),
+  'FAN trebuie sa fie document separat');
+assert.ok(feedbackV5Page2.some(c => /DONA/i.test(groupLines(c).join(' '))),
+  'DONA trebuie sa fie document separat');
+const printedDaisyV5 = groupLines(feedbackV5Page1.find(c =>
+  /14332/.test(groupLines(c).join(' ')))).join(' ');
+assert.ok(printedDaisyV5.includes('18518510'),
+  'CUI-ul emitentului Daisy trebuie pastrat in clusterul DSF');
+assert.ok(!printedDaisyV5.includes('43544049')
+    || printedDaisyV5.indexOf('18518510') < printedDaisyV5.indexOf('43544049'),
+  'CUI-ul platitorului nu trebuie sa inlocuiasca emitentul din antet');
 
 const chitantaWords = [
   { text: 'CHITANTA', x: 10, y: 10, w: 100, h: 20 },
@@ -179,16 +223,28 @@ const chitantaSource = fs.readFileSync(path.join(root, 'OcrServer', 'ChitantaExt
 const anafSource = fs.readFileSync(path.join(root, 'OcrServer', 'AnafValidator.swift'), 'utf8');
 const segmenterSource = fs.readFileSync(path.join(root, 'OcrServer', 'ReceiptSegmenterV2.swift'), 'utf8');
 const recognizerSource = fs.readFileSync(path.join(root, 'OcrServer', 'TextRecognizerPro.swift'), 'utf8');
-assert.match(receiptSource, /if vat\.rates\.isEmpty/,
-  'nu se inventeaza o cota TVA cand procentul lipseste');
+assert.match(receiptSource, /cota legala/,
+  'cand cota TVA lipseste din OCR se foloseste cota legala la data documentului');
+assert.match(receiptSource, /productLineTotal|derivat_din_articole/,
+  'totalul poate fi reconstruit din articole / linia de produs');
+assert.match(receiptSource, /Litri x pret|fuelTotal/,
+  'combustibilul poate corecta totalul gresit');
 assert.equal(receiptSource.includes('CAPITAL\\\\s+SOCIAL'), true,
   'capitalul social este exclus din sume');
+assert.match(chitantaSource, /TRX/,
+  'ID TRX/CHITANTA de pe bonuri nu trebuie clasificat ca chitanta');
 assert.match(segmenterSource, /splitSideBySideDocuments/,
   'bonurile alaturate trebuie separate o singura data, la detectia initiala');
 assert.match(routeSource, /func isolatedCell\(for index: Int\)/,
   'fiecare document trebuie sa primeasca o celula OCR izolata de vecini');
-assert.match(routeSource, /finalDetections\.reserveCapacity\(detections\.count\)/,
-  'numarul documentelor finale trebuie sa porneasca din numarul detectiilor fizice');
+assert.match(routeSource, /cleanByTurns/,
+  'zonele OCR curate trebuie reunite pe orientare inainte de segmentarea paginii');
+assert.match(routeSource, /appendSegmented|ReceiptSegmenterV2\.segment/,
+  'numarul documentelor finale trebuie stabilit dupa re-OCR la nivelul paginii');
+assert.match(routeSource, /Fallback full-page re-OCR|fullClean/,
+  'daca detectia pierde documente, exista fallback pe toata pagina');
+assert.doesNotMatch(routeSource, /finalDetections\.reserveCapacity\(detections\.count\)/,
+  'o zona initiala nu trebuie presupusa automat drept un singur document');
 assert.match(routeSource, /for \(detIndex, det\) in detections\.enumerated\(\)/,
   'fiecare detectie fizica trebuie procesata exact o data');
 assert.match(recognizerSource, /mapRectFromBase/,
@@ -201,6 +257,8 @@ assert.doesNotMatch(routeSource, /deduplicate\(refinedCandidates\)/,
   'deduplicarea dupa crop nu mai are voie sa elimine documente reale');
 assert.doesNotMatch(routeSource, /expandDownward:/,
   'un crop nu se mai extinde liber in documentul de dedesubt');
+assert.match(routeSource, /linesText: rawLines \+ hwLines/,
+  'antetul tiparit trebuie sa aiba prioritate fata de OCR-ul de mana');
 assert.match(routeSource, /vatAmounts\.reduce\(0, \+\)/,
   'TVA-ul cotelor multiple trebuie agregat');
 assert.match(routeSource, /handwritingPass\(\s*on: rotImg,\s*clusterBoxes: clean\)/,
@@ -219,7 +277,83 @@ assert.match(chitantaSource, /explicitNumberRx/,
   'Numar/Nouar trebuie sa aiba prioritate fata de nr. din adresa');
 assert.match(chitantaSource, /payerIdRx/,
   'CUI-ul platitorului trebuie izolat de numarul Registrului Comertului');
+assert.match(chitantaSource, /SRONAR/,
+  'eticheta Numar degradata de OCR trebuie acceptata fara valori hardcodate');
+assert.match(chitantaSource, /degradedTitle/,
+  'titlul de chitanta cu prima litera pierduta trebuie clasificat semantic');
+assert.match(receiptSource, /"P": "0"/,
+  'P citit in CUI-ul MOL trebuie tratat ca ipoteza OCR pentru zero');
+assert.match(receiptSource, /\[%X/,
+  'X citit in locul semnului procent trebuie acceptat numai in context TVA');
 assert.match(anafSource, /found\.count == 1/,
   'unicul candidat confirmat ANAF trebuie folosit pentru repararea CUI');
+assert.match(anafSource, /confirmat_anaf/,
+  'CUI valid gasit la ANAF este confirmat chiar daca antetul OCR e zgomotos');
+
+// --- Extractie end-to-end pe dump-ul real (ground truth 6 bonuri) ---
+const { extract } = require('./extract_node');
+
+const bonuriV5ForExtract = JSON.parse(fs.readFileSync(
+  path.join(__dirname, 'cases', 'bonuri_feedback_v5.txt'), 'utf8'));
+const extractClusters = segment(bonuriV5ForExtract);
+assert.equal(extractClusters.length, 6, 'extractie: 6 clustere');
+
+const extracted = extractClusters.map(c => {
+  const lines = groupLines(c);
+  const text = lines.join(' ');
+  assert.equal(looksLikeSingleChitanta(c), false,
+    'niciun cluster din poza de bonuri nu e chitanta: ' + text.slice(0, 40));
+  return { text, result: extract(lines) };
+});
+
+function findExtract(re) {
+  for (let i = 0; i < extracted.length; i++) {
+    if (re.test(extracted[i].text)) return { i, ...extracted[i] };
+  }
+  return null;
+}
+
+for (const exp of [
+  { key: /DOUGLAS/i, total: 613.10, vat: 106.41, cui: '22254794' },
+  { key: /MOL ROMANIA|PETROLEUM/i, total: 188.16, vat: 32.66, cui: '7745470' },
+  { key: /TURIST/i, total: 181.15, vat: 31.44, cui: '7709175' },
+]) {
+  const hit = findExtract(exp.key);
+  assert.ok(hit, 'lipsa document: ' + exp.key);
+  assert.equal(hit.result.total, exp.total,
+    `total ${exp.key} asteptat ${exp.total}, gasit ${hit.result.total}`);
+  assert.ok(Math.abs((hit.result.vat || 0) - exp.vat) <= 0.06,
+    `TVA ${exp.key} asteptat ${exp.vat}, gasit ${hit.result.vat}`);
+  if (exp.cui) assert.equal(hit.result.cui, exp.cui, `CUI ${exp.key}`);
+}
+
+const rog = findExtract(/146[.,]26|R046953|35[.,]5\s*L/i);
+assert.ok(rog, 'ROG GAZ trebuie extras');
+assert.equal(rog.result.total, 146.26, 'ROG total din litri x pret');
+assert.ok(Math.abs((rog.result.vat || 0) - 25.38) <= 0.06, 'ROG TVA ' + rog.result.vat);
+
+const mag = extracted.filter(e => /MAGISTRAL/i.test(e.text) && /34626689/.test(e.text));
+assert.equal(mag.length, 2, 'doua bonuri Magistral');
+const magTotals = mag.map(m => m.result.total).sort((a, b) => a - b);
+assert.deepEqual(magTotals, [180.75, 183.48], 'totaluri Magistral');
+
+const molWords = extractClusters.find(c => /MOL/i.test(groupLines(c).join(' ')));
+assert.equal(looksLikeSingleChitanta(molWords), false, 'MOL cu TRX/CHITANTA ramane bon fiscal');
+
+const chitV5 = JSON.parse(fs.readFileSync(
+  path.join(__dirname, 'cases', 'chitante_feedback_v5.txt'), 'utf8'));
+let pb = 1, lr = -Infinity;
+for (let i = 1; i < chitV5.length; i++) {
+  const reset = chitV5[i - 1].y - chitV5[i].y;
+  if (reset > lr) { lr = reset; pb = i; }
+}
+const amerisCluster = segment(chitV5.slice(pb)).find(c =>
+  /AMERIS/i.test(groupLines(c).join(' ')));
+assert.ok(amerisCluster, 'Ameris pe pagina 2');
+const amerisExt = extract(groupLines(amerisCluster));
+assert.equal(amerisExt.total, 420.45, 'Ameris total');
+assert.ok(Math.abs((amerisExt.vat || 0) - 44.67) <= 0.15,
+  'Ameris TVA multi-cota ~44.67 got ' + amerisExt.vat);
 
 console.log('OK: toate regresiile universale au trecut.');
+console.log('OK: extractie ground-truth 6 bonuri + Ameris multi-TVA.');

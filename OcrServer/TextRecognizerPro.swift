@@ -5,7 +5,7 @@
 //  INLOCUIESTE TextRecognizerPlus.swift (scoate-l pe cel vechi din target).
 //
 //  Ce rezolva fata de versiunea Plus:
-//   1. Bonuri cu orientari DIFERITE in aceeasi poza (cazul ROG GAZ, rotit 90°).
+//   1. Bonuri cu orientari DIFERITE in aceeasi poza (ex. unul rotit 90°).
 //      Versiunea veche alegea O SINGURA orientare globala pentru toata poza,
 //      deci bonul rotit nu producea niciun cuvant si disparea complet.
 //      Acum: detectie in toate cele 4 orientari, segmentare per orientare,

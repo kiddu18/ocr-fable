@@ -13,5 +13,9 @@
   Pastreaza dovada contaminarii dintre crop-uri (ABAD/Daisy in pagina
   Ameris/FAN/Dona); regresia structurala verifica eliminarea traseului care a
   produs aceasta contaminare.
+- `bonuri_feedback_v5.txt` — dump-ul exact al buildului v5: interfata afisa 3
+  rezultate, dar segmentarea intregii pagini demonstreaza 6 documente.
+- `chitante_feedback_v5.txt` — dump-ul exact al buildului v5: pagina 1 are 3
+  documente, iar pagina 2 se separa in Ameris, FAN si DONA.
 
 Regula: fiecare esec din productie devine un fisier aici + o linie in acest README.

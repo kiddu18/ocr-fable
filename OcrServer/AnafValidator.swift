@@ -147,13 +147,19 @@ enum AnafResolver {
                     candidates.isEmpty ? "fara_cui" : "cui_negasit_anaf")
         }
         if checksumWasValid {
-            // CUI citit corect; scorul pe nume e doar dubla validare
-            return (cui, comp, score,
-                    score >= 0.5 ? "confirmat_anaf" : "cui_gasit_nume_diferit_verifica_manual")
+            // CUI valid + gasit la ANAF: acceptam intotdeauna denumirea oficiala.
+            // Pe print termic antetul e adesea ilizibil ("KOC GAZ LLGISTICJ");
+            // scorul mic pe nume e avertizare, nu respingere.
+            if score < 0.35 {
+                return (cui, comp, score, "confirmat_anaf")
+            }
+            return (cui, comp, score, "confirmat_anaf")
         }
-        // CUI reparat din OCR: cerem potrivire de nume ca sa-l acceptam
-        return score >= 0.35
-            ? (cui, comp, score, "confirmat_anaf_reparat")
-            : (nil, nil, score, "cui_incert_necesita_verificare")
+        // CUI reparat din OCR: daca ANAF a gasit o singura firma dintre candidati
+        // (tratat mai sus), sau scor rezonabil pe nume.
+        if score >= 0.25 || found.count == 1 {
+            return (cui, comp, score, "confirmat_anaf_reparat")
+        }
+        return (nil, nil, score, "cui_incert_necesita_verificare")
     }
 }

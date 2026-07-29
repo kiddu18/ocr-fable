@@ -77,8 +77,8 @@ function xycut(words, minGapX, minGapY, out) {
   } else out.push(words);
 }
 
-const repair = s => s.toUpperCase().replace(/[OQDIL|ZSBG@]/g, c => ({O:'0',Q:'0',D:'0',I:'1',L:'1','|':'1',Z:'2',S:'5',B:'8',G:'6','@':'0'}[c]));
-const ctx = /(?:COD\s*FISCAL|COD\s*IDENTIFICARE\s*FISCALA|\bC\.?\s*I\.?\s*F\b|\bCUI\b)\s*[.:]?\s*(?:R[O0])?\s*([0-9OQDILSZB@]{4,12})/ig;
+const repair = s => s.toUpperCase().replace(/[OQDPIL|ZSBG@]/g, c => ({O:'0',Q:'0',D:'0',P:'0',I:'1',L:'1','|':'1',Z:'2',S:'5',B:'8',G:'6','@':'0'}[c]));
+const ctx = /(?:COD\s*FISCAL|COD\s*IDENTIFICARE\s*FISCALA|\bC\.?\s*I\.?\s*F\b|\bCUI\b)\s*[.:]?\s*(?:R[O0])?\s*([0-9OQDPILSZB@]{4,12})/ig;
 const excl = /CLIENT|CNP|CUMPARATOR|BENEF/i;
 const strong = /NUMAR\s*BON|COD\s*FISCAL|COD\s*IDENTIFICARE\s*FISCALA|\bR[O0]\s?\d{6,10}\b/i;
 const anchor = /NUMAR\s*BON|COD\s*FISCAL|COD\s*IDENTIFICARE\s*FISCALA|\bC\.?\s*I\.?\s*F\b|\bCUI\b|\bR[O0]\s?\d{6,10}\b|\b(?:S\.?\s?R\.?\s?L\.?|S\.?A\.?|P\.?F\.?A\.?)\b/i;
@@ -86,8 +86,21 @@ const chitantaTitle = /\bCH[I1L][T7L][A-ZĂÂÎȘȚ]{3,}\b|(?:SERIE|SERIA|SERIC)
 
 function looksLikeSingleChitanta(words) {
   const text = groupLines(words).join(' ').toUpperCase();
-  if (/BON\s+FISCAL|TOTAL\s*TVA|CASA\s+DE\s+MARCAT/i.test(text)) return false;
-  return chitantaTitle.test(text) || (text.includes('PRIMIT DE LA') && text.includes('SUMA'));
+  // Aliniat cu ChitantaExtractor.looksLikeChitanta (v7)
+  if (/BON\s*FISCAL|TOTAL\s*TVA|CASA\s+DE\s+MARCAT|NUMAR\s*BON|AMEF|EJTRZ/i.test(text)) return false;
+  if (/MOTORINA|BENZINA|\bGPL\b|DIESEL|ADBLUE|SKID\s*GPL/i.test(text)) return false;
+  if (/TRX\s*\/\s*CHITANTA|ID\s*TRX\s*\/\s*CH/i.test(text)) return false;
+  const title = /(?:^|\s)CH[I1L][T7L][A-ZĂÂÎȘȚ]{3,}(?:\s|$)|(?:^|\s)CHITAN[TȚ]A(?:\s|$)/i.test(text)
+    || chitantaTitle.test(text);
+  const degradedTitle = /(?:^|\s)H[I1L][T7L][A-Z]{3,}(?:\s|$)/i.test(text);
+  const formEvidence = /(?:AM\s*)?PR[I1U]M[I1U]T\s+DE\s+L[AE]/i.test(text)
+    || /(?:SERIE|SERIA|SERIC)\s*[\/-]?\s*(?:NUMAR|NOUAR|NHONAR|SRONAR|ANAR)/i.test(text);
+  const amountEvidence = /\bSU[MN](?:A|K|KI|AI)\b/i.test(text);
+  const courier = /CHITANTA\s+RAMBURS|RAMBURS\s+CONT\s+COLECTOR|SERIA\s+RAMB/i.test(text);
+  return courier
+    || (title && (formEvidence || amountEvidence))
+    || (formEvidence && amountEvidence)
+    || (degradedTitle && formEvidence && amountEvidence);
 }
 
 function merchantCuis(words) {

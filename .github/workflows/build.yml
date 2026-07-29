@@ -6,16 +6,41 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Gate rapid: algoritmul de segmentare + extractie (fara Xcode).
+  # Ruleaza pe ubuntu — prinde regresii de total/TVA/clasificare in ~10s.
+  regression:
+    name: Extractor regression (universal)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run offline regression
+        run: |
+          node tools/replay_segmentare/regression_node.js
+
   build:
     name: Build Unsigned IPA
+    needs: regression
     runs-on: macos-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Select Xcode
+        run: |
+          # macos-latest schimba Xcode; alegem unul recent stabil daca exista
+          ls /Applications | grep -i Xcode || true
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer || true
+          xcodebuild -version
+
       - name: Build App
-        continue-on-error: true
         run: |
           set -o pipefail
           xcodebuild clean build \
@@ -27,28 +52,35 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-            CONFIGURATION_BUILD_DIR=$PWD/build > build_log.txt 2>&1
+            CONFIGURATION_BUILD_DIR=$PWD/build 2>&1 | tee build_log.txt
 
-      - name: Show Errors
+      - name: Show Errors (if any)
+        if: failure()
         run: |
           echo "==== XCODEBUILD ERRORS ===="
           grep -A 10 -B 2 -i "error:" build_log.txt || true
           echo "==========================="
-          if grep -q "FAIL" build_log.txt || grep -qi "error:" build_log.txt; then
-             exit 1
-          fi
 
       - name: Package into IPA
         run: |
+          test -d build/OcrServer.app
           mkdir -p Payload
-          cp -r build/OcrServer.app Payload/
+          cp -R build/OcrServer.app Payload/
           zip -qr OcrServer.ipa Payload
-
-
+          ls -lh OcrServer.ipa
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
           name: OcrServer-App
           path: OcrServer.ipa
-          retention-days: 5
+          retention-days: 14
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build_log.txt
+          retention-days: 7
+          if-no-files-found: ignore

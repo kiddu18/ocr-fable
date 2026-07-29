@@ -391,10 +391,10 @@ actor VaporServer {
                 // selectorul din pagina: "auto" | "bon" | "chitanta" (doc_type = clientul nou, processing_mode = cel vechi)
                 let mode = (upload.doc_type ?? upload.processing_mode ?? "auto").lowercased()
                 
-                // Fiecare detectie initiala ramane EXACT un document. Ii atribuim
-                // o celula a paginii, taiata la jumatatea distantei fata de vecinii
-                // de pe acelasi rand/aceeasi coloana. Re-OCR-ul poate astfel vedea
-                // zone slabe din formular, dar nu poate intra in documentul vecin.
+                // Fiecare ZONA initiala primeste o celula a paginii, taiata la
+                // jumatatea distantei fata de zonele vecine. O zona poate contine
+                // unul sau mai multe documente; numarul final se stabileste dupa
+                // re-OCR, prin segmentarea unica a intregii pagini/orientari.
                 func isolatedCell(for index: Int) -> CGRect {
                     let a = detections[index].baseRect
                     var left = 0.0, top = 0.0
@@ -450,8 +450,12 @@ actor VaporServer {
                                   width: right - left, height: bottom - top)
                 }
 
-                var finalDetections: [ReceiptDetection] = []
-                finalDetections.reserveCapacity(detections.count)
+                // Detectia rapida poate intoarce o zona fizica lata/inalta care
+                // contine mai multe documente. Re-OCR-ul izolat face textul
+                // lizibil, apoi reunim zonele din ACEEASI orientare si segmentam
+                // o singura data la nivelul paginii. Astfel 3 zone initiale pot
+                // deveni corect 6 bonuri, fara crop-uri care se suprapun.
+                var cleanByTurns: [Int: [OCRBoxItem]] = [:]
                 for (detIndex, det) in detections.enumerated() {
                     let rotImg = rotatedImage(det.turns)
                     let baseCell = isolatedCell(for: detIndex)
@@ -461,11 +465,71 @@ actor VaporServer {
                     let clean = await pro.cropAndReOCR(
                         rotatedImage: rotImg, cropRect: rotatedCell,
                         fallbackBoxes: det.words)
-                    finalDetections.append(ReceiptDetection(
-                        turns: det.turns, words: clean, baseRect: det.baseRect,
-                        score: TextRecognizerPro.documentQuality(clean)))
+                    cleanByTurns[det.turns, default: []].append(contentsOf: clean)
                 }
-                print("Documente finale stabile: \(finalDetections.count)")
+
+                var pageCandidates: [ReceiptDetection] = []
+                func appendSegmented(from cleanPage: [OCRBoxItem], turns: Int) {
+                    let rotImg = rotatedImage(turns)
+                    let segmented = ReceiptSegmenterV2.segment(cleanPage)
+                    let clusters = segmented.isEmpty ? [cleanPage] : segmented
+                    for cluster in clusters where !cluster.isEmpty {
+                        let bb = TextRecognizerPro.bbox(cluster)
+                        let rotRect = CGRect(x: bb.minX, y: bb.minY,
+                                             width: bb.maxX - bb.minX,
+                                             height: bb.maxY - bb.minY)
+                        let baseRect = TextRecognizerPro.mapRectToBase(
+                            rotRect, turns: turns,
+                            rotatedW: rotImg.width, rotatedH: rotImg.height)
+                        pageCandidates.append(ReceiptDetection(
+                            turns: turns, words: cluster, baseRect: baseRect,
+                            score: TextRecognizerPro.documentQuality(cluster)))
+                    }
+                }
+                for (turns, cleanPage) in cleanByTurns where !cleanPage.isEmpty {
+                    appendSegmented(from: cleanPage, turns: turns)
+                }
+
+                // Plasa de siguranta: daca celulele izolate au pierdut documente
+                // (crop prea strans / re-OCR slab), re-OCR pe toata pagina in
+                // orientarile promitatoare si resegmentam. Pastreaza candidatii
+                // cu scor mai bun prin dedup ulterior.
+                let headerAnchors = pageCandidates.filter { det in
+                    let t = ReceiptSegmenterV2.groupLines(det.words).joined(separator: " ").uppercased()
+                    return t.range(of: "COD\\s*FISCAL|NUMAR\\s*BON|CHITAN|C\\.?I\\.?F|\\bCUI\\b|BON\\s*FISCAL",
+                                   options: .regularExpression) != nil
+                }.count
+                if headerAnchors < max(detections.count, 2) || pageCandidates.count < detections.count {
+                    print("Fallback full-page re-OCR (candidati=\(pageCandidates.count), detectii=\(detections.count))")
+                    for turns in Set(detections.map(\.turns) + [0]) {
+                        let rotImg = rotatedImage(turns)
+                        let fullRect = CGRect(x: 0, y: 0,
+                                              width: rotImg.width, height: rotImg.height)
+                        let fullClean = await pro.cropAndReOCR(
+                            rotatedImage: rotImg, cropRect: fullRect, fallbackBoxes: [])
+                        if fullClean.count >= 20 {
+                            appendSegmented(from: fullClean, turns: turns)
+                        }
+                    }
+                }
+
+                // Dedup: acelasi document fizic (re-OCR pe celula + full-page, sau
+                // orientari diferite). Documente alaturate au IoU mic si raman.
+                var finalDetections: [ReceiptDetection] = []
+                for candidate in pageCandidates.sorted(by: { $0.score > $1.score }) {
+                    let duplicate = finalDetections.contains { existing in
+                        TextRecognizerPro.samePhysicalDocument(
+                            existing.baseRect, candidate.baseRect)
+                    }
+                    if !duplicate { finalDetections.append(candidate) }
+                }
+                finalDetections.sort { a, b in
+                    if abs(a.baseRect.minY - b.baseRect.minY) > 20 {
+                        return a.baseRect.minY < b.baseRect.minY
+                    }
+                    return a.baseRect.minX < b.baseRect.minX
+                }
+                print("Documente finale dupa segmentarea paginii: \(finalDetections.count)")
 
                 for det in finalDetections {
                     let rotImg = rotatedImage(det.turns)
@@ -500,7 +564,11 @@ actor VaporServer {
                         let focusedLines = focusedWords.map { $0.text }
                             + ReceiptSegmenterV2.groupLines(focusedWords)
                         let hwLines = ReceiptSegmenterV2.groupLines(hwWords)
-                        let ch = ChitantaExtractor.extract(linesText: hwLines,
+                        // Textul brut ramane sursa principala pentru antetul
+                        // tiparit (emitent, CUI, serie). OCR-ul de mana completeaza
+                        // campurile scrise, dar nu are voie sa inlocuiasca antetul
+                        // cu numele/CUI-ul platitorului din zona de jos.
+                        let ch = ChitantaExtractor.extract(linesText: rawLines + hwLines,
                                                           linesDigits: rawLines,
                                                           linesFocused: focusedLines,
                                                           myCui: myCui)

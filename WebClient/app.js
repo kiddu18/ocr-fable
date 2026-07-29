@@ -219,8 +219,13 @@ async function processNext() {
         formData.append('buyer_cui', buyerCuiInput.value.trim());
     }
     
-    const processingMode = document.getElementById('processing-mode')?.value || 'bon';
+    // auto = detectie bon vs chitanta pe server; nu forta "bon" (pierdea chitantele)
+    const processingMode = document.getElementById('processing-mode')?.value
+        || document.getElementById('doc-type')?.value
+        || document.getElementById('docType')?.value
+        || 'auto';
     formData.append('processing_mode', processingMode);
+    formData.append('doc_type', processingMode);
 
     const baseUrl = document.getElementById('server-ip').value.replace(/\/$/, "");
 
