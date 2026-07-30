@@ -209,6 +209,16 @@ enum RoCUI {
         var seen = Set<String>()
         candidates = candidates.filter { $0 != buyerCui && $0.count >= 2 && $0.count <= 10 && seen.insert($0).inserted }
 
+        // Preferam forma citita de pe bon (R07745478 → 7745478), nu append-uri
+        // de 1 cifra (77454781) sau flip-uri (8745478 = PF HAGIU). ANAF + nume
+        // raman sursa de adevar; aici doar alegem candidatul de start bun.
+        let bases = raw.map(normalizeDigits).filter { !$0.isEmpty && $0.count >= 2 && $0.count <= 10 }
+        if let exact = bases.first {
+            provisionalBest = exact
+            checksumOK = isValid(exact)
+            if !candidates.contains(exact) { candidates.insert(exact, at: 0) }
+        }
+
         // best e provizoriu (checksum); sursa de adevar = ANAF + nume dupa batch
         return (provisionalBest, provisionalRaw, checksumOK, candidates.isEmpty ? (provisionalBest.map { [$0] } ?? []) : candidates)
     }
@@ -567,6 +577,9 @@ enum ReceiptExtractor {
         let legal = try! NSRegularExpression(
             pattern: "\\b(S\\.?\\s?R\\.?\\s?L\\.?|S\\.?A\\.?|P\\.?F\\.?A\\.?|S\\.?C\\.?S\\.?|I\\.?I\\.?)(\\b|$)",
             options: [.caseInsensitive])
+        let junk = try! NSRegularExpression(
+            pattern: "BON\\s*FISCAL|TOTAL|TVA|CARD|CASH|NUMERAR|SUBTOTAL|DATA|ORA|CASIER|OPERATOR|POS\\b|EJTRZ|SKID|GPL\\b|MOTORINA|BENZINA",
+            options: [.caseInsensitive])
         func collapse(_ s: String) -> String {
             let parts = s.split(separator: " ").map(String.init)
             var out: [String] = []
@@ -576,16 +589,34 @@ enum ReceiptExtractor {
             }
             return out.joined(separator: " ")
         }
-        for line in lines.prefix(8) {
+        func isGarbage(_ s: String) -> Bool {
+            let letters = s.filter { $0.isLetter }.count
+            let digits = s.filter { $0.isNumber }.count
+            if letters < 3 { return true }
+            if digits > letters { return true }
+            // "9C B 183,48 8,00 31,84 19:15:24" — coloana de sume citita ca "nume"
+            if s.range(of: "\\d{1,5}[.,]\\d{2}", options: .regularExpression) != nil,
+               digits >= 4 { return true }
+            let r = NSRange(s.startIndex..., in: s)
+            if junk.firstMatch(in: s, range: r) != nil, legal.firstMatch(in: s, range: r) == nil {
+                return true
+            }
+            return false
+        }
+        for line in lines.prefix(10) {
             let cleaned = collapse(line.trimmingCharacters(in: .whitespaces))
+            guard cleaned.count >= 6, !isGarbage(cleaned) else { continue }
             let r = NSRange(cleaned.startIndex..., in: cleaned)
-            // Evita "SRL VITAN 34626689" (adresa + CUI lipite) — vrem denumire cu litere
-            let digitHeavy = cleaned.filter { $0.isNumber }.count > cleaned.filter { $0.isLetter }.count
-            if legal.firstMatch(in: cleaned, range: r) != nil, cleaned.count >= 6, !digitHeavy {
+            if legal.firstMatch(in: cleaned, range: r) != nil {
                 return cleaned
             }
         }
-        return lines.first.map { collapse($0.trimmingCharacters(in: .whitespaces)) }
+        // Fallback: prima linie non-gunoi (nu sume / antet fiscal gol)
+        for line in lines.prefix(6) {
+            let cleaned = collapse(line.trimmingCharacters(in: .whitespaces))
+            if cleaned.count >= 4, !isGarbage(cleaned) { return cleaned }
+        }
+        return nil
     }
 
     private static let rateValues: Set<Double> = [5, 9, 11, 19, 21]
@@ -619,15 +650,32 @@ enum ReceiptExtractor {
             guard rx.firstMatch(in: line, range: r) != nil else { continue }
             let onLine = FinExtract.amounts(in: line).filter(isPlausibleTotal)
             if let amt = onLine.max() { return amt }
-            for next in lines.dropFirst(i + 1).prefix(3) {
+            // Douglas: TOTAL pe o linie, 613.10 pe urmatoarele (uneori dupa TVA label)
+            for next in lines.dropFirst(i + 1).prefix(6) {
                 let nr = NSRange(next.startIndex..., in: next)
                 if rejected.firstMatch(in: next, range: nr) != nil { continue }
-                if next.range(of: "%|COTA|TVA\\s*[A-E]", options: [.regularExpression, .caseInsensitive]) != nil {
+                if next.range(of: "%|COTA\\s*TVA", options: [.regularExpression, .caseInsensitive]) != nil {
                     continue
                 }
                 let amts = FinExtract.amounts(in: next).filter(isPlausibleTotal)
-                if let amt = amts.max() { return amt }
+                // Prefera sume > 30 RON (evita cote/pret unitar 4.14 pe linia gresita)
+                if let amt = amts.filter({ $0 >= 30 }).max() ?? amts.max() { return amt }
             }
+        }
+        // Casa de marcat retipareste totalul de 2–4 ori (TOTAL/CARD/CASH).
+        var freq: [String: (Double, Int)] = [:]
+        for line in lines {
+            let upper = line.uppercased()
+            if upper.range(of: "CUI|CIF|FISCAL|COD\\s*FISC|CLIENT|CNP|RC\\s*:|AUTOR|TRX|POS\\b|EJTRZ|TELEFON|IBAN",
+                           options: .regularExpression) != nil { continue }
+            for v in FinExtract.amounts(in: line) where isPlausibleTotal(v) && v >= 10 {
+                let key = String(format: "%.2f", v)
+                let prev = freq[key]
+                freq[key] = (v, (prev?.1 ?? 0) + 1)
+            }
+        }
+        if let best = freq.values.filter({ $0.1 >= 2 }).max(by: { $0.0 < $1.0 }) {
+            return best.0
         }
         return nil
     }
@@ -639,26 +687,46 @@ enum ReceiptExtractor {
                 || full.range(of: "\\b[A-E]\\b") != nil else {
             return nil
         }
+        // Accepta si dubluri OCR: "443.00 A A", "72.90-A 72.90-A"
         let fiscalRow = try! NSRegularExpression(
-            pattern: "(?:^|\\s|-)\\b[A-E]\\b\\s*$", options: [.caseInsensitive])
+            pattern: "(?:^|\\s|-)\\b[A-E]\\b(?:\\s+[A-E]\\b)*\\s*$", options: [.caseInsensitive])
+        let fiscalInline = try! NSRegularExpression(
+            pattern: "(\\d{1,5})[.,](\\d{2})\\s*-?\\s*[A-E]\\b", options: [.caseInsensitive])
         let excluded = try! NSRegularExpression(
             pattern: "\\bTOTAL\\b|SUBTOTAL|\\bTVA\\b|CARD|CASH|NUMERAR|REST|RULAJ|COTA",
             options: [.caseInsensitive])
         var values: [Double] = []
         for line in lines {
             let range = NSRange(line.startIndex..., in: line)
-            guard fiscalRow.firstMatch(in: line, range: range) != nil,
-                  excluded.firstMatch(in: line, range: range) == nil,
-                  let value = FinExtract.amounts(in: line).last else { continue }
-            if rateValues.contains(value) { continue }
+            if excluded.firstMatch(in: line, range: range) != nil { continue }
             let upper = line.uppercased()
             let negative = upper.range(
-                of: "DISCOUNT|REDUCERE|RABAT|\\d[.,]\\d{2}\\s*-\\s*[A-E]\\s*$|\\d[.,]\\d{2}-[A-E]\\s*$",
+                of: "DISCOUNT|REDUCERE|RABAT|\\d[.,]\\d{2}\\s*-\\s*[A-E]|\\d[.,]\\d{2}-[A-E]",
                 options: .regularExpression) != nil
-            values.append(negative ? -value : value)
+            if fiscalRow.firstMatch(in: line, range: range) != nil,
+               let value = FinExtract.amounts(in: line).last,
+               !rateValues.contains(value) {
+                values.append(negative ? -value : value)
+                continue
+            }
+            // "GOOD GIRL 443.00 A" cand linia nu se termina strict pe litera
+            if let m = fiscalInline.firstMatch(in: line, range: range) {
+                let ns = line as NSString
+                if let v = Double("\(ns.substring(with: m.range(at: 1))).\(ns.substring(with: m.range(at: 2)))"),
+                   !rateValues.contains(v), v >= 1 {
+                    values.append(negative ? -v : v)
+                }
+            }
         }
         guard !values.isEmpty else { return nil }
-        let total = values.reduce(0, +).ron2
+        // Dubluri OCR pe acelasi articol: 443,443,243,243,-72.9,-72.9 → unice pe valoare+semn
+        // Nu unice strict: doua articole pot avea acelasi pret. Colapsam doar perechi consecutive.
+        var collapsed: [Double] = []
+        for v in values {
+            if let last = collapsed.last, abs(last - v) < 0.001 { continue }
+            collapsed.append(v)
+        }
+        let total = collapsed.reduce(0, +).ron2
         return total > 0 ? total : nil
     }
 

@@ -226,9 +226,74 @@ function splitSideBySideDocuments(cluster, mh, depth = 0) {
   return [cluster];
 }
 
-function absorbOrphans(clusters,mh){const anchored=clusters.filter(hasFiscalHeader),orphans=clusters.filter(c=>!hasFiscalHeader(c));if(!anchored.length)return clusters;for(const o of orphans){const ob=bbox(o);let bi=-1,bk=[Infinity,Infinity];anchored.forEach((a,i)=>{const ab=bbox(a),inter=Math.min(ob.maxX,ab.maxX)-Math.max(ob.minX,ab.minX),minw=Math.min(ob.maxX-ob.minX,ab.maxX-ab.minX),xo=inter>0&&minw>0?inter/minw:0,vg=Math.max(ab.minY-ob.maxY,ob.minY-ab.maxY,0),hg=Math.max(ab.minX-ob.maxX,ob.minX-ab.maxX,0),key=[xo>.3?0:1,xo>.3?vg:Math.hypot(vg,hg)];if(key[0]<bk[0]||(key[0]===bk[0]&&key[1]<bk[1])){bk=key;bi=i;}});if(bi>=0&&bk[1]<=mh*20)anchored[bi].push(...o);}return anchored;}
+function isValuableFragment(part) {
+  if (!part || !part.length) return false;
+  const text = groupLines(part).join(' ');
+  if (chitantaTitle.test(text)) return true;
+  if (/(?<!SUB)\bTOTAL\b|\bTVA\b|SUBTOTAL|SUMA\s*TVA/i.test(text)) return true;
+  const moneyHits = (text.match(/\b\d{1,5}[.,]\d{2}\b/g) || []).length;
+  return moneyHits >= 1 && part.length >= 2;
+}
 
-function segment(words){words=normalizeOrientation(words);const mh=medianHeight(words),parts=[];xycut(words,mh,mh*1.5,parts);let m=mergeFragments(parts.filter(p=>p.length>=8||chitantaTitle.test(groupLines(p).join(' '))),mh).flatMap(p=>splitByAnchors(p,mh)).flatMap(p=>enforceOneHeader(p,mh));m=absorbOrphans(m,mh);const ordered=m.filter(p=>p.length>=12).sort((a,b)=>Math.floor(bbox(a).minX/400)-Math.floor(bbox(b).minX/400)||bbox(a).minY-bbox(b).minY);return ordered.flatMap(c=>splitSideBySideDocuments(c,mh));}
+function absorbOrphans(clusters, mh) {
+  let anchored = clusters.filter(hasFiscalHeader);
+  let orphans = clusters.filter(c => !hasFiscalHeader(c));
+  if (!anchored.length) return clusters;
+  // Reclasifica "insule" de sume din anchored daca n-au antet de comerciant
+  const loose = [...orphans];
+  const hosts = [];
+  for (const a of anchored) {
+    const text = groupLines(a).join(' ').toUpperCase();
+    const hasMerchant = merchantCuis(a).size > 0
+      || /SRL|S\.A\.|PFA|NUMAR\s*BON|COD\s*FISCAL/i.test(text);
+    if (!hasMerchant && isValuableFragment(a) && a.length < 20) loose.push(a);
+    else hosts.push(a);
+  }
+  const dest = hosts.length ? hosts : anchored;
+  for (const o of loose) {
+    const ob = bbox(o);
+    let bi = -1, bestTier = Infinity, bestDist = Infinity;
+    const oText = groupLines(o).join(' ').toUpperCase();
+    const oIsMoney = /\b\d{1,5}[.,]\d{2}\b/.test(oText);
+    dest.forEach((a, i) => {
+      const ab = bbox(a);
+      const inter = Math.min(ob.maxX, ab.maxX) - Math.max(ob.minX, ab.minX);
+      const minw = Math.min(ob.maxX - ob.minX, ab.maxX - ab.minX);
+      const xo = inter > 0 && minw > 0 ? inter / minw : 0;
+      const vg = Math.max(ab.minY - ob.maxY, ob.minY - ab.maxY, 0);
+      const hg = Math.max(ab.minX - ob.maxX, ob.minX - ab.maxX, 0);
+      const yInter = Math.min(ob.maxY, ab.maxY) - Math.max(ob.minY, ab.minY);
+      const minh = Math.min(ob.maxY - ob.minY, ab.maxY - ab.minY);
+      const yo = yInter > 0 && minh > 0 ? yInter / minh : 0;
+      let tier, dist;
+      if (xo > 0.3) { tier = 0; dist = vg; }
+      else if (oIsMoney && yo > 0.15 && hg < mh * 25) { tier = 0; dist = hg; }
+      else { tier = 1; dist = Math.hypot(vg, hg); }
+      if (tier < bestTier || (tier === bestTier && dist < bestDist)) {
+        bestTier = tier; bestDist = dist; bi = i;
+      }
+    });
+    const maxDist = oIsMoney ? mh * 35 : mh * 20;
+    if (bi >= 0 && bestDist <= maxDist) dest[bi].push(...o);
+    else if (o.length >= 12) dest.push(o);
+  }
+  return dest;
+}
+
+function segment(words) {
+  words = normalizeOrientation(words);
+  const mh = medianHeight(words), parts = [];
+  xycut(words, mh, mh * 1.5, parts);
+  const kept = parts.filter(p => p.length >= 8 || isValuableFragment(p));
+  let m = mergeFragments(kept, mh)
+    .flatMap(p => splitByAnchors(p, mh))
+    .flatMap(p => enforceOneHeader(p, mh));
+  m = absorbOrphans(m, mh);
+  const ordered = m.filter(p => p.length >= 12)
+    .sort((a, b) => Math.floor(bbox(a).minX / 400) - Math.floor(bbox(b).minX / 400)
+      || bbox(a).minY - bbox(b).minY);
+  return ordered.flatMap(c => splitSideBySideDocuments(c, mh));
+}
 
 function describe(clusters){console.log(`clusters=${clusters.length}`);clusters.forEach((c,i)=>{const b=bbox(c),text=groupLines(c).join(' | '),names=[...new Set((text.match(/MAGISTRAL|MOL|DOUGLAS|TURIST|ROG|DAISY|AMERIS|DONA|FAN/ig)||[]).map(x=>x.toUpperCase()))];console.log(`${i}: n=${c.length} x=${b.minX.toFixed(0)}-${b.maxX.toFixed(0)} y=${b.minY.toFixed(0)}-${b.maxY.toFixed(0)} names=${names.join(',')} cuis=${[...merchantCuis(c)].join(',')}`);});}
 

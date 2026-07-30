@@ -45,14 +45,30 @@ function totalAmount(lines) {
     if (rejected.test(line) || !hasTotal.test(line)) continue;
     const onLine = amountsIn(line).filter(isPlausibleTotal);
     if (onLine.length) return Math.max(...onLine);
-    for (const next of lines.slice(i + 1, i + 4)) {
+    for (const next of lines.slice(i + 1, i + 7)) {
       if (rejected.test(next)) continue;
-      if (/%|COTA|TVA\s*[A-E]/i.test(next)) continue;
+      if (/%|COTA\s*TVA/i.test(next)) continue;
       const amts = amountsIn(next).filter(isPlausibleTotal);
+      const big = amts.filter(v => v >= 30);
+      if (big.length) return Math.max(...big);
       if (amts.length) return Math.max(...amts);
     }
   }
-  return null;
+  // Total retiparit de 2+ ori pe bon (TOTAL/CARD/CASH)
+  const freq = new Map();
+  for (const line of lines) {
+    if (/CUI|CIF|FISCAL|COD\s*FISC|CLIENT|CNP|RC\s*:|AUTOR|TRX|POS\b|EJTRZ|TELEFON|IBAN/i.test(line)
+        && !/TOTAL|CARD|CASH/i.test(line)) continue;
+    for (const v of amountsIn(line).filter(a => isPlausibleTotal(a) && a >= 10)) {
+      const k = v.toFixed(2);
+      freq.set(k, { v, n: (freq.get(k)?.n || 0) + 1 });
+    }
+  }
+  let best = null;
+  for (const { v, n } of freq.values()) {
+    if (n >= 2 && (!best || v > best)) best = v;
+  }
+  return best;
 }
 
 function itemizedTotal(lines) {
@@ -60,17 +76,30 @@ function itemizedTotal(lines) {
   if (!/\bTOTAL\b|SUBTOTAL|TOTALTVA|\bBF\b|\b[A-E]\b/.test(full)) return null;
   const values = [];
   for (const line of lines) {
-    if (!/(?:^|\s|-)\b[A-E]\b\s*$/i.test(line)) continue;
     if (/\bTOTAL\b|SUBTOTAL|\bTVA\b|CARD|CASH|NUMERAR|REST|RULAJ|COTA/i.test(line)) continue;
-    const amts = amountsIn(line);
-    if (!amts.length) continue;
-    const value = amts[amts.length - 1];
-    if (RATE_VALUES.has(value)) continue;
-    const neg = /DISCOUNT|REDUCERE|RABAT|\d[.,]\d{2}\s*-\s*[A-E]\s*$|\d[.,]\d{2}-[A-E]\s*$/i.test(line);
-    values.push(neg ? -value : value);
+    const neg = /DISCOUNT|REDUCERE|RABAT|\d[.,]\d{2}\s*-\s*[A-E]|\d[.,]\d{2}-[A-E]/i.test(line);
+    if (/(?:^|\s|-)\b[A-E]\b(?:\s+[A-E]\b)*\s*$/i.test(line)) {
+      const amts = amountsIn(line);
+      if (!amts.length) continue;
+      const value = amts[amts.length - 1];
+      if (RATE_VALUES.has(value)) continue;
+      values.push(neg ? -value : value);
+      continue;
+    }
+    const m = line.match(/(\d{1,5})[.,](\d{2})\s*-?\s*[A-E]\b/i);
+    if (m) {
+      const value = Number(`${m[1]}.${m[2]}`);
+      if (!RATE_VALUES.has(value) && value >= 1) values.push(neg ? -value : value);
+    }
   }
   if (!values.length) return null;
-  const t = ron2(values.reduce((a, b) => a + b, 0));
+  // Collapse consecutive OCR duplicates: 443,443,243,243,-72.9,-72.9
+  const collapsed = [];
+  for (const v of values) {
+    if (collapsed.length && Math.abs(collapsed[collapsed.length - 1] - v) < 0.001) continue;
+    collapsed.push(v);
+  }
+  const t = ron2(collapsed.reduce((a, b) => a + b, 0));
   return t > 0 ? t : null;
 }
 
@@ -190,9 +219,11 @@ function extractCui(lines) {
   const candidates = [];
   for (const c of raw) {
     let d = normalize(c);
-    if (!d || d.length < 4) continue;
+    if (!d || d.length < 2) continue;
+    // Mereu forma citita — ANAF + nume decid (checksum e doar semnal)
+    candidates.push(d);
     if (isValid(d)) candidates.push(d);
-    if (d.length > 4 && isValid(d.slice(1))) candidates.push(d.slice(1));
+    if (d.length > 2 && isValid(d.slice(1))) candidates.push(d.slice(1));
     // CUI trunchiat: +1 sau +2 cifre
     const before = candidates.length;
     if (d.length >= 4 && d.length <= 8 && !isValid(d)) {
@@ -218,16 +249,18 @@ function extractCui(lines) {
       }
     }
   }
-  const uniq = [...new Set(candidates)].filter(c => c.length >= 6 && c.length <= 10);
-  if (uniq.length === 1) return { cui: uniq[0], ok: true, candidates: uniq };
-  if (uniq.length > 1) {
-    // Preferam extensia de lungime minima a prefixului citit (77454+70, nu flip-uri)
-    const base = raw[0] ? normalize(raw[0]) : '';
-    const extensions = uniq.filter(c => c.startsWith(base) && c.length > base.length)
-      .sort((a, b) => a.length - b.length || a.localeCompare(b));
-    return { cui: extensions[0] || uniq[0], ok: false, candidates: uniq };
+  const uniq = [...new Set(candidates)].filter(c => c.length >= 2 && c.length <= 10);
+  const bases = raw.map(normalize).filter(b => b && b.length >= 2 && b.length <= 10);
+  // Preferam forma citita de pe bon (R07745478 → 7745478), nu append-uri
+  // de 1 cifra care trec checksum (77454781) sau flip-uri (8745478 = PF HAGIU).
+  if (bases.length) {
+    const exact = bases[0];
+    return { cui: exact, ok: isValid(exact), candidates: uniq.length ? uniq : [exact] };
   }
-  return { cui: raw[0] ? normalize(raw[0]) : null, ok: false, candidates: [] };
+  const grounded = uniq.filter(c => isValid(c)).sort((a, b) => a.length - b.length || a.localeCompare(b));
+  if (grounded.length) return { cui: grounded[0], ok: true, candidates: uniq };
+  if (uniq.length) return { cui: uniq[0], ok: isValid(uniq[0]), candidates: uniq };
+  return { cui: null, ok: false, candidates: [] };
 }
 
 function parseDate(lines) {

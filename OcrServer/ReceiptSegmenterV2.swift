@@ -65,11 +65,12 @@ enum ReceiptSegmenterV2 {
         xycut(input, minGapX: mh * 1.0, minGapY: mh * 1.5, into: &parts)
         // Un bloc lateral "CHITANTA / Serie / Numar / Data" poate avea doar
         // 4-7 cuvinte; il pastram pentru reunirea semantica de mai jos.
+        // CRITICAL: pe Douglas, totalul (613.10 / 106.41) iese pe o "insula"
+        // de 4–6 cuvinte la dreapta, din cauza golului XY-cut. Daca il aruncam
+        // aici, absorbOrphans nu mai are ce lipi pe bon → total gol in UI.
         parts = parts.filter { part in
             if part.count >= 8 { return true }
-            let text = groupLines(part).joined(separator: " ")
-            return chitantaTitleRx.firstMatch(
-                in: text, range: NSRange(text.startIndex..., in: text)) != nil
+            return isValuableFragment(part)
         }
 
         var merged = mergeFragments(parts, medianHeight: mh)
@@ -444,6 +445,25 @@ enum ReceiptSegmenterV2 {
              + enforceOneHeader(hi, medianHeight: mh, depth: depth + 1)
     }
 
+    /// Fragmente mici pe care XY-cut le rupe din corp: sume (613.10), TVA,
+    /// titlu chitanta. Fara asta, totalul Douglas dispare din cluster.
+    private static let moneyTokenRx = try! NSRegularExpression(
+        pattern: "\\b\\d{1,5}[.,]\\d{2}\\b")
+    private static let amountContextRx = try! NSRegularExpression(
+        pattern: "(?<!SUB)\\bTOTAL\\b|\\bTVA\\b|SUBTOTAL|SUMA\\s*TVA",
+        options: [.caseInsensitive])
+
+    static func isValuableFragment(_ part: [OCRBoxItem]) -> Bool {
+        if part.isEmpty { return false }
+        let text = groupLines(part).joined(separator: " ")
+        let r = NSRange(text.startIndex..., in: text)
+        if chitantaTitleRx.firstMatch(in: text, range: r) != nil { return true }
+        if amountContextRx.firstMatch(in: text, range: r) != nil { return true }
+        // Cel putin o suma monetara tipica de bon (nu un an / CUI)
+        let moneyHits = moneyTokenRx.numberOfMatches(in: text, range: r)
+        return moneyHits >= 1 && part.count >= 2
+    }
+
     static func absorbOrphans(_ clusters: [[OCRBoxItem]],
                               medianHeight mh: Double) -> [[OCRBoxItem]] {
         var anchored: [[OCRBoxItem]] = []
@@ -452,29 +472,65 @@ enum ReceiptSegmenterV2 {
             if hasFiscalHeader(c) { anchored.append(c) } else { orphans.append(c) }
         }
         guard !anchored.isEmpty else { return clusters }
-        for o in orphans {
+        // Orfani = fara antet SAU fragmente pure de sume (TOTAL / 613.10) care
+        // pot avea accidental un token "TOTAL" dar nu antet fiscal complet.
+        var loose: [[OCRBoxItem]] = orphans
+        var hosts = anchored
+        // Reclasifica din anchored fragmentele care sunt DOAR sume (fara CUI/numar bon)
+        var pureHosts: [[OCRBoxItem]] = []
+        for a in hosts {
+            let text = groupLines(a).joined(separator: " ").uppercased()
+            let hasMerchant = merchantCuiHints(a).isEmpty == false
+                || text.range(of: "SRL|S\\.A\\.|PFA|NUMAR\\s*BON|COD\\s*FISCAL",
+                              options: .regularExpression) != nil
+            if !hasMerchant && isValuableFragment(a) && a.count < 20 {
+                loose.append(a)
+            } else {
+                pureHosts.append(a)
+            }
+        }
+        hosts = pureHosts.isEmpty ? anchored : pureHosts
+        for o in loose {
             let ob = bbox(o)
             var bestIdx = -1
             var bestTier = Int.max
             var bestDist = Double.greatestFiniteMagnitude
-            for (i, a) in anchored.enumerated() {
+            let oText = groupLines(o).joined(separator: " ").uppercased()
+            let oIsMoney = moneyTokenRx.firstMatch(
+                in: oText, range: NSRange(oText.startIndex..., in: oText)) != nil
+            for (i, a) in hosts.enumerated() {
                 let ab = bbox(a)
                 let inter = min(ob.maxX, ab.maxX) - max(ob.minX, ab.minX)
                 let minw = min(ob.maxX - ob.minX, ab.maxX - ab.minX)
                 let xov = (inter > 0 && minw > 0) ? inter / minw : 0
                 let vgap = max(ab.minY - ob.maxY, ob.minY - ab.maxY, 0)
                 let hgap = max(ab.minX - ob.maxX, ob.minX - ab.maxX, 0)
-                let tier = xov > 0.3 ? 0 : 1
-                let dist = tier == 0 ? vgap : (vgap * vgap + hgap * hgap).squareRoot()
+                // Sumele pe Douglas stau la dreapta (overlap Y mare, gap X mic)
+                let yInter = min(ob.maxY, ab.maxY) - max(ob.minY, ab.minY)
+                let minh = min(ob.maxY - ob.minY, ab.maxY - ab.minY)
+                let yov = (yInter > 0 && minh > 0) ? yInter / minh : 0
+                let tier: Int
+                let dist: Double
+                if xov > 0.3 {
+                    tier = 0; dist = vgap
+                } else if oIsMoney && yov > 0.15 && hgap < mh * 25 {
+                    tier = 0; dist = hgap  // lipeste coloana de sume pe corp
+                } else {
+                    tier = 1; dist = (vgap * vgap + hgap * hgap).squareRoot()
+                }
                 if tier < bestTier || (tier == bestTier && dist < bestDist) {
                     bestTier = tier; bestDist = dist; bestIdx = i
                 }
             }
-            if bestIdx >= 0, bestDist <= mh * 20 {
-                anchored[bestIdx].append(contentsOf: o)
+            let maxDist = oIsMoney ? mh * 35 : mh * 20
+            if bestIdx >= 0, bestDist <= maxDist {
+                hosts[bestIdx].append(contentsOf: o)
+            } else if o.count >= 12 {
+                // Orfan mare: pastreaza-l ca document potential
+                hosts.append(o)
             }
         }
-        return anchored
+        return hosts
     }
 
     // MARK: - CUI-urile de comerciant dintr-un cluster (exclude liniile CLIENT/CNP)

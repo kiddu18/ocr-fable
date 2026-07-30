@@ -391,6 +391,25 @@ final class TextRecognizerPro {
         }
         if text.range(of: "\\b\\d{1,2}[./-]\\d{1,2}[./-]20\\d{2}\\b",
                       options: .regularExpression) != nil { score += 120 }
+        // Completețea sumelor: un cluster doar cu antet (TOTAL fara 613.10) pierde
+        // in fata full-page care are sumele. Fiecare suma monetara tipica +40.
+        let moneyRx = try! NSRegularExpression(pattern: "\\b\\d{1,5}[.,]\\d{2}\\b")
+        let moneyCount = moneyRx.numberOfMatches(
+            in: text, range: NSRange(text.startIndex..., in: text))
+        score += Double(min(moneyCount, 12)) * 40
+        // Bonus daca exista atat eticheta TOTAL cat si o suma >= 10 langa ea
+        if text.range(of: "(?<!SUB)\\bTOTAL\\b(?!\\s*TVA).{0,40}\\d{1,5}[.,]\\d{2}",
+                      options: .regularExpression) != nil {
+            score += 200
+        }
+        // Penalizeaza cluster-uri care arata a coloana de sume fara antet
+        let hasLegal = text.range(of: "\\bS\\.?R\\.?L\\.?|\\bS\\.?A\\.?|PFA",
+                                  options: .regularExpression) != nil
+        let hasCuiCtx = text.range(of: "COD\\s*FISC|C\\.?I\\.?F|\\bCUI\\b",
+                                   options: .regularExpression) != nil
+        if moneyCount >= 2 && !hasLegal && !hasCuiCtx && words.count < 20 {
+            score -= 150
+        }
         return score
     }
 
