@@ -567,13 +567,25 @@ enum ReceiptExtractor {
         let legal = try! NSRegularExpression(
             pattern: "\\b(S\\.?\\s?R\\.?\\s?L\\.?|S\\.?A\\.?|P\\.?F\\.?A\\.?|S\\.?C\\.?S\\.?|I\\.?I\\.?)(\\b|$)",
             options: [.caseInsensitive])
-        for line in lines.prefix(6) {
-            let r = NSRange(line.startIndex..., in: line)
-            if legal.firstMatch(in: line, range: r) != nil, line.count >= 6 {
-                return line.trimmingCharacters(in: .whitespaces)
+        func collapse(_ s: String) -> String {
+            let parts = s.split(separator: " ").map(String.init)
+            var out: [String] = []
+            for p in parts {
+                if let last = out.last, last.caseInsensitiveCompare(p) == .orderedSame { continue }
+                out.append(p)
+            }
+            return out.joined(separator: " ")
+        }
+        for line in lines.prefix(8) {
+            let cleaned = collapse(line.trimmingCharacters(in: .whitespaces))
+            let r = NSRange(cleaned.startIndex..., in: cleaned)
+            // Evita "SRL VITAN 34626689" (adresa + CUI lipite) — vrem denumire cu litere
+            let digitHeavy = cleaned.filter { $0.isNumber }.count > cleaned.filter { $0.isLetter }.count
+            if legal.firstMatch(in: cleaned, range: r) != nil, cleaned.count >= 6, !digitHeavy {
+                return cleaned
             }
         }
-        return lines.first?.trimmingCharacters(in: .whitespaces)
+        return lines.first.map { collapse($0.trimmingCharacters(in: .whitespaces)) }
     }
 
     private static let rateValues: Set<Double> = [5, 9, 11, 19, 21]
@@ -780,23 +792,40 @@ enum ReceiptExtractor {
                 break
             }
         }
-        // formate reale: "10,39 X18,11 L", "4,14 X44,32 LITRU", "35,5 L X 4,12", "4,20 X43,131 LITRU"
+        // DOAR pe linii de carburant. Altfel "443.00 x 243.00" de pe Douglas
+        // (preturi de articole) era interpretat ca litri×pret → total 107649.
+        // Formate: "10,39 X18,11 L", "4,14 X44,32 LITRU", "35,5 L X 4,12"
         let pairRx = try! NSRegularExpression(
-            pattern: "(\\d{1,3}[.,]\\d{1,3})\\s*(?:L(?:ITRU)?\\s*)?[Xx×]\\s*(\\d{1,3}[.,]\\d{1,3})")
+            pattern: "(\\d{1,3}[.,]\\d{1,3})\\s*(?:L(?:ITRU)?\\s*)?[Xx×]\\s*(\\d{1,3}[.,]\\d{1,3})\\s*L?(?:ITRU)?")
         for line in lines {
             let up = line.uppercased()
             let r = NSRange(up.startIndex..., in: up)
-            guard let m = pairRx.firstMatch(in: up, range: r) else { continue }
+            let isFuelLine = product != nil
+                || up.range(of: "\\bL(?:ITRU)?\\b|MOTORINA|BENZINA|\\bGPL\\b|DIESEL|ADBLUE",
+                            options: .regularExpression) != nil
+            guard isFuelLine, let m = pairRx.firstMatch(in: up, range: r) else { continue }
             let ns = up as NSString
             func num(_ i: Int) -> Double? {
                 Double(ns.substring(with: m.range(at: i)).replacingOccurrences(of: ",", with: "."))
             }
             guard let a = num(1), let b = num(2) else { continue }
-            // pretul unitar la pompa e in mod normal 2.5-15 RON; litrii, de regula, mai multi
+            // pret pompa tipic 2.5–25 RON/L; litri tipic 1–200 (nu sute de lei ca pret produs)
+            let priceRange = 2.0...25.0
+            let litersRange = 0.5...250.0
             let (liters, price): (Double, Double)
-            if (2.5...15).contains(a) && !(2.5...15).contains(b) { (liters, price) = (b, a) }
-            else if (2.5...15).contains(b) && !(2.5...15).contains(a) { (liters, price) = (a, b) }
-            else { (liters, price) = (max(a, b), min(a, b)) }
+            if priceRange.contains(a) && litersRange.contains(b) && !priceRange.contains(b) {
+                (liters, price) = (b, a)
+            } else if priceRange.contains(b) && litersRange.contains(a) && !priceRange.contains(a) {
+                (liters, price) = (a, b)
+            } else if priceRange.contains(a) && litersRange.contains(b) {
+                (liters, price) = (b, a)
+            } else if priceRange.contains(b) && litersRange.contains(a) {
+                (liters, price) = (a, b)
+            } else {
+                continue  // doua preturi de magazin (443 x 243) — NU e carburant
+            }
+            // sanity: litri×pret nu depaseste un total rezonabil de bon
+            if liters * price > 50_000 { continue }
             return (liters, price, product)
         }
         return (nil, nil, product)

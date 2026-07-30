@@ -504,11 +504,45 @@ enum ReceiptSegmenterV2 {
         linesWithY(words).map { $0.text }
     }
 
+    /// Elimina dublurile din re-OCR dublu (zona + full-page): acelasi text la
+    /// pozitie aproape identica. Fara asta: "MAGISTRAL MAGISTRAL GAZ GAZ SRL SRL".
+    static func dedupeWords(_ words: [OCRBoxItem]) -> [OCRBoxItem] {
+        guard words.count > 1 else { return words }
+        let sorted = words.sorted { a, b in
+            let ca = a.y + a.h / 2, cb = b.y + b.h / 2
+            return ca != cb ? ca < cb : a.x < b.x
+        }
+        var out: [OCRBoxItem] = []
+        for w in sorted {
+            let t = w.text.trimmingCharacters(in: .whitespaces)
+            guard !t.isEmpty else { continue }
+            let cx = w.x + w.w / 2, cy = w.y + w.h / 2
+            let dup = out.contains { o in
+                o.text.caseInsensitiveCompare(t) == .orderedSame
+                    && abs((o.x + o.w / 2) - cx) < max(o.w, w.w, 8) * 0.55
+                    && abs((o.y + o.h / 2) - cy) < max(o.h, w.h, 6) * 0.7
+            }
+            if !dup { out.append(w) }
+        }
+        return out
+    }
+
+    /// Colapseaza tokeni consecutivi identici pe linie ("TOTAL TOTAL" → "TOTAL").
+    private static func collapseAdjacentDuplicates(_ tokens: [String]) -> [String] {
+        var out: [String] = []
+        for t in tokens {
+            if let last = out.last, last.caseInsensitiveCompare(t) == .orderedSame { continue }
+            out.append(t)
+        }
+        return out
+    }
+
     static func linesWithY(_ words: [OCRBoxItem]) -> [(y: Double, text: String)] {
         guard !words.isEmpty else { return [] }
-        let hs = words.map { $0.h }.sorted()
+        let cleaned = dedupeWords(words)
+        let hs = cleaned.map { $0.h }.sorted()
         let mh = max(hs[hs.count / 2], 4.0)
-        let sorted = words.sorted { a, b in
+        let sorted = cleaned.sorted { a, b in
             let ca = a.y + a.h / 2, cb = b.y + b.h / 2
             return ca != cb ? ca < cb : a.x < b.x
         }
@@ -526,7 +560,8 @@ enum ReceiptSegmenterV2 {
             }
         }
         return zip(centers, lines).map { (y, ws) in
-            (y, ws.sorted { $0.x < $1.x }.map { $0.text }.joined(separator: " "))
+            let tokens = collapseAdjacentDuplicates(ws.sorted { $0.x < $1.x }.map { $0.text })
+            return (y, tokens.joined(separator: " "))
         }
     }
 

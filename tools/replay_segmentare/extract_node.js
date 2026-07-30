@@ -131,16 +131,25 @@ function fuel(lines) {
     const m = line.match(/MOTORINA[A-Z0-9 ]*|BENZINA[A-Z0-9 ]*|\bGPL\b|DIESEL|ADBLUE/i);
     if (m) { product = m[0].trim(); break; }
   }
+  // Nu trata "443.00 x 243.00" (articole) ca litri×pret.
   const pairRx = /(\d{1,3}[.,]\d{1,3})\s*(?:L(?:ITRU)?\s*)?[Xx×]\s*(\d{1,3}[.,]\d{1,3})/;
   for (const line of lines) {
-    const m = line.toUpperCase().match(pairRx);
+    const up = line.toUpperCase();
+    const isFuel = product || /\bL(?:ITRU)?\b|MOTORINA|BENZINA|\bGPL\b|DIESEL|ADBLUE/.test(up);
+    if (!isFuel) continue;
+    const m = up.match(pairRx);
     if (!m) continue;
     const a = Number(m[1].replace(',', '.'));
     const b = Number(m[2].replace(',', '.'));
+    const priceOk = v => v >= 2 && v <= 25;
+    const litOk = v => v >= 0.5 && v <= 250;
     let liters, price;
-    if (a >= 2.5 && a <= 15 && !(b >= 2.5 && b <= 15)) { liters = b; price = a; }
-    else if (b >= 2.5 && b <= 15 && !(a >= 2.5 && a <= 15)) { liters = a; price = b; }
-    else { liters = Math.max(a, b); price = Math.min(a, b); }
+    if (priceOk(a) && litOk(b) && !priceOk(b)) { liters = b; price = a; }
+    else if (priceOk(b) && litOk(a) && !priceOk(a)) { liters = a; price = b; }
+    else if (priceOk(a) && litOk(b)) { liters = b; price = a; }
+    else if (priceOk(b) && litOk(a)) { liters = a; price = b; }
+    else continue;
+    if (liters * price > 50000) continue;
     return { liters, price, product };
   }
   return { liters: null, price: null, product };

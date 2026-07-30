@@ -486,14 +486,18 @@ actor VaporServer {
                             score: TextRecognizerPro.documentQuality(cluster)))
                     }
                 }
+                // Dedup spatial pe cuvintele din zone (inainte de full-page)
+                for turns in cleanByTurns.keys {
+                    cleanByTurns[turns] = ReceiptSegmenterV2.dedupeWords(cleanByTurns[turns] ?? [])
+                }
                 for (turns, cleanPage) in cleanByTurns where !cleanPage.isEmpty {
                     appendSegmented(from: cleanPage, turns: turns)
                 }
 
-                // INTOTDEAUNA re-OCR pe toata pagina (orientarile deja selectate + 0).
-                // Celulele izolate pot taia antetul/footerul sau unifica 2 bonuri;
-                // full-page + segmentare e sursa de adevar pentru numarul de documente.
-                // Dedup pe IoU pastreaza varianta cu scor maxim per document fizic.
+                // Full-page re-OCR pe orientarile selectate. NU amestecam din nou
+                // cuvintele din zone ca fallbackBoxes (producea "TOTAL TOTAL" /
+                // "MAGISTRAL MAGISTRAL" si strica sumele). Comparam scorurile
+                // documentelor dupa segmentare si pastram pe cele mai bune (IoU).
                 print("Full-page re-OCR (candidati din zone=\(pageCandidates.count), detectii=\(detections.count))")
                 var fullPageTurns = Set(detections.map(\.turns))
                 fullPageTurns.insert(0)
@@ -501,13 +505,11 @@ actor VaporServer {
                     let rotImg = rotatedImage(turns)
                     let fullRect = CGRect(x: 0, y: 0,
                                           width: rotImg.width, height: rotImg.height)
-                    // fallback: cuvintele deja citite din zone, ca sa nu pierdem text
-                    // daca full-page OCR e mai slab pe o zona
-                    let fallback = cleanByTurns[turns] ?? []
                     let fullClean = await pro.cropAndReOCR(
-                        rotatedImage: rotImg, cropRect: fullRect, fallbackBoxes: fallback)
-                    if fullClean.count >= 12 {
-                        appendSegmented(from: fullClean, turns: turns)
+                        rotatedImage: rotImg, cropRect: fullRect, fallbackBoxes: [])
+                    let deduped = ReceiptSegmenterV2.dedupeWords(fullClean)
+                    if deduped.count >= 12 {
+                        appendSegmented(from: deduped, turns: turns)
                     }
                 }
                 print("Candidati dupa full-page: \(pageCandidates.count)")
@@ -594,6 +596,25 @@ actor VaporServer {
                     AccountingOrchestrator.shared.lastClustersJson = clustersData
                 }
                 
+                // --- 3b. Dedup logic dupa extractie (acelasi bon aparut de 2 ori
+                //         din zone + full-page, ex. FAN dublat)
+                func nearEq(_ a: Double?, _ b: Double?) -> Bool {
+                    guard let a, let b else { return a == nil && b == nil }
+                    return abs(a - b) < 0.05
+                }
+                var seenReceiptKeys = Set<String>()
+                receiptsList = receiptsList.filter { r in
+                    let key = "\((r.cui ?? r.cuiOCR ?? "").filter { $0.isNumber })}|\(r.date ?? "")|\(r.bonNumber ?? "")|\(String(format: "%.2f", r.total ?? -1))"
+                    if key.hasPrefix("||") && r.total == nil { return true } // pastreaza incomplete distincte
+                    return seenReceiptKeys.insert(key).inserted
+                }
+                var seenChitKeys = Set<String>()
+                chitanteList = chitanteList.filter { ch in
+                    let key = "\((ch.emitentCui ?? "").filter { $0.isNumber })}|\(ch.serie ?? "")|\(ch.numar ?? "")|\(ch.date ?? "")|\(String(format: "%.2f", ch.suma ?? -1))"
+                    return seenChitKeys.insert(key).inserted
+                }
+                print("Dupa dedup extractie: \(receiptsList.count) bonuri, \(chitanteList.count) chitante")
+
                 // --- 4. UN SINGUR batch ANAF v9 pentru toate CUI-urile din poza
                 //        (limita ANAF: 1 request/secunda -> nu apela per bon!)
                 var allCandidates: [String] = []
