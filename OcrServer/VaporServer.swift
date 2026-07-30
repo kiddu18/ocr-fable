@@ -599,11 +599,13 @@ actor VaporServer {
                 var allCandidates: [String] = []
                 for r in receiptsList {
                     allCandidates.append(contentsOf: r.anafCandidates)
-                    if let b = r.buyerCui, RoCUI.isValid(b) { allCandidates.append(b) }
+                    if let c = r.cui { allCandidates.append(c) }           // forma citita / checksum
+                    if let b = r.buyerCui { allCandidates.append(b) }      // si cumparatorul (2–10 cifre)
                 }
                 for ch in chitanteList {
                     allCandidates.append(contentsOf: ch.anafCandidatesEmitent)
-                    if let p = ch.platitorCui, RoCUI.isValid(p) { allCandidates.append(p) }
+                    if let e = ch.emitentCui { allCandidates.append(e) }
+                    if let p = ch.platitorCui { allCandidates.append(p) }
                 }
                 
                 let anafInfo = await AnafClient.shared.verifyBatch(allCandidates)

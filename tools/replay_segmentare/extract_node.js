@@ -167,8 +167,8 @@ function extractCui(lines) {
     return d;
   }
   function isValid(cui) {
-    // min 6: CUI-uri scurte trec accidental checksum-ul dupa trunchiere OCR
-    if (!/^\d{6,10}$/.test(cui)) return false;
+    // Oficial RO: 2–10 cifre + checksum. ANAF + nume decid forma finala.
+    if (!/^\d{2,10}$/.test(cui)) return false;
     const key = [...'753217532'].reverse();
     const digits = [...cui].reverse().map(Number);
     const control = digits[0];

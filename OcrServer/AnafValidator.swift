@@ -116,50 +116,52 @@ actor AnafClient {
 
 enum AnafResolver {
 
-    /// Alege, dintre candidatii CUI ai unui bon, pe cel confirmat de ANAF a carui
-    /// denumire oficiala seamana cel mai bine cu antetul citit din bon.
-    /// `checksumWasValid` = CUI-ul a trecut checksum-ul direct (nu e reparat din OCR).
+    /// Alege CUI-ul final dintre candidati:
+    ///  1. interogare ANAF (deja facuta in batch)
+    ///  2. potrivire denumire oficiala ↔ antet OCR (merchant name)
+    /// Checksum-ul local e doar un indiciu; ANAF + nume decid.
+    /// `checksumWasValid` = forma citita de pe bon trece checksum-ul (2–10 cifre).
     static func resolve(candidates: [String], checksumWasValid: Bool,
                         ocrHeader: String, anaf: [String: AnafCompany])
         -> (cui: String?, company: AnafCompany?, score: Double, status: String) {
 
-        // Daca OCR-ul a stricat o cifra, dar dintre toate variantele care trec
-        // checksum-ul ANAF confirma o singura firma, rezultatul este neambiguu
-        // chiar daca antetul firmei nu a fost citit (caz frecvent pe bonuri inguste).
         let found = candidates.compactMap { cui -> (String, AnafCompany)? in
             anaf[cui].map { (cui, $0) }
         }
-        if !checksumWasValid, found.count == 1 {
+
+        // Un singur hit ANAF → acceptam (indiferent de checksum), denumirea oficiala e adevarul.
+        if found.count == 1 {
             let (cui, company) = found[0]
             let score = AnafClient.nameMatchScore(
                 anafName: company.denumire ?? "", ocrHeader: ocrHeader)
-            return (cui, company, score, "confirmat_anaf_reparat")
+            let repaired = !checksumWasValid || (candidates.first != cui)
+            return (cui, company, score,
+                    repaired ? "confirmat_anaf_reparat" : "confirmat_anaf")
         }
 
+        // Mai multi candidati gasiti la ANAF: castiga cel cu denumirea cea mai apropiata
+        // de antetul bonului (ex. "MOL ROMANIA..." vs candidati trunchiati).
         var best: (String, AnafCompany, Double)? = nil
-        for c in candidates {
-            guard let comp = anaf[c] else { continue }
+        for (cui, comp) in found {
             let s = AnafClient.nameMatchScore(anafName: comp.denumire ?? "", ocrHeader: ocrHeader)
-            if best == nil || s > best!.2 { best = (c, comp, s) }
+            if best == nil || s > best!.2 { best = (cui, comp, s) }
         }
+
         guard let (cui, comp, score) = best else {
-            return (checksumWasValid ? candidates.first : nil, nil, 0,
+            // Nimeni la ANAF: pastram CUI-ul citit daca are checksum, altfel incert.
+            if checksumWasValid, let first = candidates.first {
+                return (first, nil, 0, "cui_negasit_anaf")
+            }
+            return (nil, nil, 0,
                     candidates.isEmpty ? "fara_cui" : "cui_negasit_anaf")
         }
-        if checksumWasValid {
-            // CUI valid + gasit la ANAF: acceptam intotdeauna denumirea oficiala.
-            // Pe print termic antetul e adesea ilizibil ("KOC GAZ LLGISTICJ");
-            // scorul mic pe nume e avertizare, nu respingere.
-            if score < 0.35 {
-                return (cui, comp, score, "confirmat_anaf")
-            }
-            return (cui, comp, score, "confirmat_anaf")
+
+        // Scor pe nume: prag blând — pe termic antetul e zgomotos.
+        if score >= 0.20 || found.count >= 1 {
+            let repaired = !checksumWasValid || candidates.first != cui
+            return (cui, comp, score,
+                    repaired && score < 0.5 ? "confirmat_anaf_reparat" : "confirmat_anaf")
         }
-        // CUI reparat din OCR: daca ANAF a gasit o singura firma dintre candidati
-        // (tratat mai sus), sau scor rezonabil pe nume.
-        if score >= 0.25 || found.count == 1 {
-            return (cui, comp, score, "confirmat_anaf_reparat")
-        }
-        return (nil, nil, score, "cui_incert_necesita_verificare")
+        return (cui, comp, score, "cui_gasit_nume_diferit_verifica_manual")
     }
 }

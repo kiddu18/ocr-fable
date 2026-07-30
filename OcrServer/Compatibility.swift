@@ -8,9 +8,9 @@
 import Foundation
 
 enum CUI {
-    /// MIN 4 CIFRE (nu 2!) — cu 2 cifre checksum-ul validează "25", "19", "21" etc.
+    /// Checksum oficial: 2–10 cifre. Alegerea finala e la ANAF + denumire (RoCUI).
     static func isValid(_ cui: String) -> Bool {
-        guard cui.count >= 4, cui.count <= 10, Int(cui) != nil else { return false }
+        guard cui.count >= 2, cui.count <= 10, Int(cui) != nil else { return false }
         let key = Array("753217532".reversed())
         let digits = Array(cui.reversed())
         guard let control = digits.first?.wholeNumberValue else { return false }

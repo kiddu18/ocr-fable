@@ -93,10 +93,10 @@ extension Double {
 
 enum RoCUI {
 
-    /// Checksum-ul oficial. MIN 6 cifre — sub 6, checksum-ul valideaza accidental
-    /// si CUI-uri trunchiate de OCR (ex. "77454" din "7745470").
+    /// Checksum oficial CUI/CIF Romania: 2–10 cifre (nu impunem minim artificial).
+    /// Validarea fiscala reala se face la ANAF + potrivire denumire.
     static func isValid(_ cui: String) -> Bool {
-        guard cui.count >= 6, cui.count <= 10, Int(cui) != nil else { return false }
+        guard cui.count >= 2, cui.count <= 10, Int(cui) != nil else { return false }
         let key = Array("753217532".reversed())
         let digits = Array(cui.reversed())
         guard let control = digits.first?.wholeNumberValue else { return false }
@@ -117,18 +117,18 @@ enum RoCUI {
         return String(s.uppercased().map { subs[$0] ?? $0 })
     }
 
-    /// Extrage CUI-ul comerciantului:
-    ///  - DOAR cu context (COD FISCAL / C.I.F. / CUI / prefix RO)
-    ///  - NICIODATA de pe linii CLIENT / CNP / BENEF (acolo e CUI-ul cumparatorului)
-    ///  - daca checksum-ul nu trece, genereaza candidati cu o cifra reparata/adaugata;
-    ///    candidatii se rezolva ulterior prin batch-ul ANAF + fuzzy match pe denumire.
+    /// Extrage CUI-ul comerciantului (universal):
+    ///  1. DOAR cu context (COD FISCAL / C.I.F. / CUI / RO…) — nu orice numar
+    ///  2. NICIODATA de pe linii CLIENT / CNP / BENEF (CUI cumparator)
+    ///  3. CUI citit (2–10 cifre) + variante OCR → candidati
+    ///  4. Rezolvarea finala: batch ANAF + fuzzy pe denumirea din antet
     static func extract(fromLines lines: [String], buyerCui: String?)
         -> (best: String?, raw: String?, checksumOK: Bool, candidates: [String]) {
 
         let buyerRx = try! NSRegularExpression(pattern: "CLIENT|CUMPARATOR|BENEF|CNP")
-        // COD IDENTIFICARE / IDENTITICARE (OCR) FISCALA; C.I.F.; CUI; prefix RO
+        // 2–10 cifre: CUI-ul legal poate fi scurt; OCR poate citi tokeni lungi
         let ctxRx = try! NSRegularExpression(
-            pattern: "(?:COD\\s*FISC[A-Z]*|COD\\s*IDENT[A-Z]{0,8}\\s*FISC[A-Z]*|C\\.?\\s*[I1]\\.?\\s*F|\\bC\\.?\\s*F\\b|\\bCUI\\b)\\s*[.:]?\\s*(?:R(?:[O0Q]|[^A-Z0-9@]{0,3}))?\\s*[.:]?\\s*([A-Z0-9@]{4,12})|\\bR[O0]\\s?([0-9OQDILSZB@]{4,12})\\b",
+            pattern: "(?:COD\\s*FISC[A-Z]*|COD\\s*IDENT[A-Z]{0,8}\\s*FISC[A-Z]*|C\\.?\\s*[I1]\\.?\\s*F|\\bC\\.?\\s*F\\b|\\bCUI\\b)\\s*[.:]?\\s*(?:R(?:[O0Q]|[^A-Z0-9@]{0,3}))?\\s*[.:]?\\s*([A-Z0-9@]{2,12})|\\bR[O0]\\s?([0-9OQDILSZB@]{2,12})\\b",
             options: [.caseInsensitive])
 
         var raw: [String] = []
@@ -143,9 +143,8 @@ enum RoCUI {
             }
         }
 
-        // Captura poate inghiti prefixul "RO" ("C.I.F.: RO17827267" -> "RO17827267"),
-        // iar repararea O->0 ar produce un fals "017827267". Eliminam prefixul.
-        // OCR pe termic: "RO" citit "R0" + CUI cu zero in fata (ex. R0 + 0XXXXXXXX).
+        // Captura poate inghiti prefixul "RO". Eliminam RO/R0; zero-uri de umplutura
+        // doar daca raman cel putin 2 cifre (CUI scurt legal).
         func normalizeDigits(_ tok: String) -> String {
             var t = tok
             if t.count > 2, t.first == "R" {
@@ -153,37 +152,45 @@ enum RoCUI {
                 if second == "O" || second == "0" || second == "Q" { t.removeFirst(2) }
             }
             var d = String(repairOCRDigits(t).filter { $0.isNumber })
-            while d.count > 4, d.first == "0" { d.removeFirst() }
+            while d.count > 2, d.first == "0" { d.removeFirst() }
             return d
         }
 
-        // 1) checksum direct
-        for c in raw {
-            let d = normalizeDigits(c)
-            if isValid(d), d != buyerCui { return (d, c, true, [d]) }
-        }
-
-        // 2) reparare ghidata de checksum -> candidati pentru batch-ul ANAF
         var candidates: [String] = []
+        var provisionalBest: String? = nil
+        var provisionalRaw: String? = raw.first
+        var checksumOK = false
+
         for c in raw {
             let d = normalizeDigits(c)
-            guard d.count >= 4 else { continue }
-            if isValid(d) { candidates.append(d) }
-            // CUI trunchiat de OCR: doar +1 sau +2 cifre (evita arbori de candidati)
-            if d.count >= 4 && d.count <= 8 && !isValid(d) {
+            guard d.count >= 2, d.count <= 10 else { continue }
+            if d == buyerCui { continue }
+
+            // Mereu includem forma citita (chiar daca checksum-ul pica) — ANAF decide.
+            candidates.append(d)
+
+            if isValid(d) {
+                if provisionalBest == nil {
+                    provisionalBest = d
+                    provisionalRaw = c
+                    checksumOK = true
+                }
+            }
+
+            // Variante OCR: +1/+2 cifre (trunchiere), -1 fata/spate, flip 1 cifra
+            if d.count <= 9 {
                 for x in "0123456789" {
                     let s1 = d + String(x)
                     if isValid(s1) { candidates.append(s1) }
-                    for y in "0123456789" {
-                        let s2 = s1 + String(y)
-                        if isValid(s2) { candidates.append(s2) }
+                    if s1.count <= 9 {
+                        for y in "0123456789" {
+                            let s2 = s1 + String(y)
+                            if isValid(s2) { candidates.append(s2) }
+                        }
                     }
                 }
-            } else {
-                for x in "0123456789" where isValid(d + String(x)) { candidates.append(d + String(x)) }
             }
-            // trunchiere o cifra din fata/spate (zero in plus din OCR)
-            if d.count > 4 {
+            if d.count > 2 {
                 let dropFirst = String(d.dropFirst())
                 if isValid(dropFirst) { candidates.append(dropFirst) }
                 let dropLast = String(d.dropLast())
@@ -198,9 +205,12 @@ enum RoCUI {
                 }
             }
         }
+
         var seen = Set<String>()
-        candidates = candidates.filter { $0 != buyerCui && seen.insert($0).inserted }
-        return (nil, raw.first, false, candidates)
+        candidates = candidates.filter { $0 != buyerCui && $0.count >= 2 && $0.count <= 10 && seen.insert($0).inserted }
+
+        // best e provizoriu (checksum); sursa de adevar = ANAF + nume dupa batch
+        return (provisionalBest, provisionalRaw, checksumOK, candidates.isEmpty ? (provisionalBest.map { [$0] } ?? []) : candidates)
     }
 }
 
