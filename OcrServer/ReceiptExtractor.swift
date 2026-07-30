@@ -93,9 +93,10 @@ extension Double {
 
 enum RoCUI {
 
-    /// Checksum-ul oficial. MIN 4 cifre — sub 4, checksum-ul valideaza si "25", "21" etc.
+    /// Checksum-ul oficial. MIN 6 cifre — sub 6, checksum-ul valideaza accidental
+    /// si CUI-uri trunchiate de OCR (ex. "77454" din "7745470").
     static func isValid(_ cui: String) -> Bool {
-        guard cui.count >= 4, cui.count <= 10, Int(cui) != nil else { return false }
+        guard cui.count >= 6, cui.count <= 10, Int(cui) != nil else { return false }
         let key = Array("753217532".reversed())
         let digits = Array(cui.reversed())
         guard let control = digits.first?.wholeNumberValue else { return false }
@@ -168,7 +169,19 @@ enum RoCUI {
             let d = normalizeDigits(c)
             guard d.count >= 4 else { continue }
             if isValid(d) { candidates.append(d) }
-            for x in "0123456789" where isValid(d + String(x)) { candidates.append(d + String(x)) }
+            // CUI trunchiat de OCR: doar +1 sau +2 cifre (evita arbori de candidati)
+            if d.count >= 4 && d.count <= 8 && !isValid(d) {
+                for x in "0123456789" {
+                    let s1 = d + String(x)
+                    if isValid(s1) { candidates.append(s1) }
+                    for y in "0123456789" {
+                        let s2 = s1 + String(y)
+                        if isValid(s2) { candidates.append(s2) }
+                    }
+                }
+            } else {
+                for x in "0123456789" where isValid(d + String(x)) { candidates.append(d + String(x)) }
+            }
             // trunchiere o cifra din fata/spate (zero in plus din OCR)
             if d.count > 4 {
                 let dropFirst = String(d.dropFirst())
@@ -357,12 +370,17 @@ enum ReceiptExtractor {
                 }
             }
         }
-        // Articolele (Douglas) castiga cand TOTAL e gol sau e un procent (21,00).
+        // Articolele castiga cand TOTAL e gol, e un procent (21,00), sau diferă
+        // mult de suma articolelor (TOTAL necitit / eticheta pe alta linie).
         if let a = articlesTotal {
             let looksLikeRate = totalOCR.map { [5.0, 9.0, 11.0, 19.0, 21.0].contains($0) } ?? true
-            if totalOCR == nil || looksLikeRate {
-                totalOCR = a
-                totalSourceHint = "derivat_din_articole"
+            let disagrees = totalOCR.map { abs($0 - a) > 1.0 && a > 10 } ?? false
+            if totalOCR == nil || looksLikeRate || (disagrees && a > (totalOCR ?? 0)) {
+                // Preferam articolele daca sunt mai mari ca un total suspect (ex. 21 vs 613)
+                if looksLikeRate || totalOCR == nil || a > (totalOCR ?? 0) + 1 {
+                    totalOCR = a
+                    totalSourceHint = "derivat_din_articole"
+                }
             }
         }
 

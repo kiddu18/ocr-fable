@@ -345,15 +345,19 @@ enum ChitantaExtractor {
         r.date = parseDate(linesDigits: linesFocused + linesDigits, linesText: linesText)
 
         // --- EMITENTUL (firma X, care a primit banii) — antetul tiparit
+        // Nu confunda "Am primit de la Y" (platitorul) cu emitentul.
         r.emitentNume = zone(after: ["UNITATEA", "ENTITATEA", "FURNIZOR", "SOCIETATEA"],
                              in: issuerLinesD + issuerLinesT,
-                             stopBefore: ["CUI", "CIF", "COD FISCAL", "NR", "ADRESA"])
+                             stopBefore: ["CUI", "CIF", "COD FISCAL", "NR", "ADRESA", "PRIMIT DE LA"])
         if r.emitentNume == nil {
             // fallback: prima linie din antet cu forma juridica, sarind peste "CHITANTA"
+            // si peste zona "Am primit de la" (acolo e platitorul).
             let legal = try! NSRegularExpression(
                 pattern: "\\b(S\\.?\\s?R\\.?\\s?L\\.?|S\\.?A\\.?|P\\.?F\\.?A\\.?|I\\.?I\\.?)(\\b|$)",
                 options: [.caseInsensitive])
-            for line in issuerLinesT where !normalize(line).contains("CHITANTA") {
+            for line in issuerLinesT {
+                let n = normalize(line)
+                if n.contains("CHITANTA") || n.contains("PRIMIT DE LA") { continue }
                 let range = NSRange(line.startIndex..., in: line)
                 if legal.firstMatch(in: line, range: range) != nil {
                     r.emitentNume = line.trimmingCharacters(in: .whitespaces); break
@@ -361,8 +365,9 @@ enum ChitantaExtractor {
             }
         }
 
-        // CUI emitent: refolosim exact motorul de la bonuri (checksum + reparare OCR)
-        let emitCui = RoCUI.extract(fromLines: issuerLinesD, buyerCui: nil)
+        // CUI emitent: DOAR din antet (issuerLines), niciodata din zona platitorului.
+        // Daca pe linie e "Am primit de la ... CUI ...", e platitorul.
+        let emitCui = RoCUI.extract(fromLines: issuerLinesD + issuerLinesT, buyerCui: nil)
         r.emitentCui = emitCui.best
         r.emitentCuiValid = emitCui.checksumOK
         r.anafCandidatesEmitent = emitCui.checksumOK ? [emitCui.best!] : emitCui.candidates
@@ -458,21 +463,36 @@ enum ChitantaExtractor {
             pattern: "(?<![A-Z0-9])([0-9OQDILZSEAGTBH]{1,5})\\s*(?:[.,+:]|\\s)\\s*([0-9OQDILZSEAGTBH]{2})(?![A-Z0-9])",
             options: [.caseInsensitive])
         let compactAmountRx = try! NSRegularExpression(
-            pattern: "\\bSU[MN](?:A|Ă|K|KI|AI)(?:\\s+DE)?[^0-9]{0,8}([0-9]{5,7})\\b",
+            pattern: "\\bSU[MN](?:A|Ă|K|KI|AI)(?:\\s+DE)?[^0-9]{0,12}([0-9]{3,7})\\b",
+            options: [.caseInsensitive])
+        // "suma de 387 46" / "Suma de 387,46 RON" / "Suma de 275.00"
+        let sumaInlineRx = try! NSRegularExpression(
+            pattern: "\\bSU[MN](?:A|Ă|K|KI|AI)(?:\\s+DE)?\\s*[.:]?\\s*([0-9]{1,5})\\s*[.,\\s]\\s*([0-9]{2})\\b",
             options: [.caseInsensitive])
         func collectAmounts(_ lines: [String], allowCompact: Bool = false,
                             exact: inout [Double], repaired: inout [Double]) {
-            for line in lines {
+            for (idx, line) in lines.enumerated() {
                 let up = normalize(line)
-                // Tolereaza confuzii OCR uzuale doar in zona etichetata "Suma".
-                guard up.range(of: "\\bSU[MN](?:A|Ă|K|KI|AI)\\b", options: .regularExpression) != nil else { continue }
+                // Tolereaza confuzii OCR uzuale doar in zona etichetata "Suma"
+                // SAU pe linia urmatoare dupa eticheta (formulare cu suma pe 2 randuri).
+                let isSumaLine = up.range(of: "\\bSU[MN](?:A|Ă|K|KI|AI)\\b", options: .regularExpression) != nil
+                let prevIsSuma = idx > 0 && normalize(lines[idx - 1])
+                    .range(of: "\\bSU[MN](?:A|Ă|K|KI|AI)\\b", options: .regularExpression) != nil
+                guard isSumaLine || prevIsSuma else { continue }
                 exact.append(contentsOf: FinExtract.amounts(in: line))
                 let range = NSRange(up.startIndex..., in: up)
+                for m in sumaInlineRx.matches(in: up, range: range) {
+                    let ns = up as NSString
+                    if let v = Double("\(ns.substring(with: m.range(at: 1))).\(ns.substring(with: m.range(at: 2)))"),
+                       v > 0 { exact.append(v.ron2) }
+                }
                 if allowCompact, let match = compactAmountRx.firstMatch(in: up, range: range) {
                     let token = (up as NSString).substring(with: match.range(at: 1))
-                    let split = token.index(token.endIndex, offsetBy: -2)
-                    if let value = Double("\(token[..<split]).\(token[split...])"), value > 0 {
-                        exact.append(value.ron2)
+                    if token.count >= 3 {
+                        let split = token.index(token.endIndex, offsetBy: -2)
+                        if let value = Double("\(token[..<split]).\(token[split...])"), value > 0 {
+                            exact.append(value.ron2)
+                        }
                     }
                 }
                 for match in fuzzyAmountRx.matches(in: up, range: range) {

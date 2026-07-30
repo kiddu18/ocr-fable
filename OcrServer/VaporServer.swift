@@ -490,28 +490,27 @@ actor VaporServer {
                     appendSegmented(from: cleanPage, turns: turns)
                 }
 
-                // Plasa de siguranta: daca celulele izolate au pierdut documente
-                // (crop prea strans / re-OCR slab), re-OCR pe toata pagina in
-                // orientarile promitatoare si resegmentam. Pastreaza candidatii
-                // cu scor mai bun prin dedup ulterior.
-                let headerAnchors = pageCandidates.filter { det in
-                    let t = ReceiptSegmenterV2.groupLines(det.words).joined(separator: " ").uppercased()
-                    return t.range(of: "COD\\s*FISCAL|NUMAR\\s*BON|CHITAN|C\\.?I\\.?F|\\bCUI\\b|BON\\s*FISCAL",
-                                   options: .regularExpression) != nil
-                }.count
-                if headerAnchors < max(detections.count, 2) || pageCandidates.count < detections.count {
-                    print("Fallback full-page re-OCR (candidati=\(pageCandidates.count), detectii=\(detections.count))")
-                    for turns in Set(detections.map(\.turns) + [0]) {
-                        let rotImg = rotatedImage(turns)
-                        let fullRect = CGRect(x: 0, y: 0,
-                                              width: rotImg.width, height: rotImg.height)
-                        let fullClean = await pro.cropAndReOCR(
-                            rotatedImage: rotImg, cropRect: fullRect, fallbackBoxes: [])
-                        if fullClean.count >= 20 {
-                            appendSegmented(from: fullClean, turns: turns)
-                        }
+                // INTOTDEAUNA re-OCR pe toata pagina (orientarile deja selectate + 0).
+                // Celulele izolate pot taia antetul/footerul sau unifica 2 bonuri;
+                // full-page + segmentare e sursa de adevar pentru numarul de documente.
+                // Dedup pe IoU pastreaza varianta cu scor maxim per document fizic.
+                print("Full-page re-OCR (candidati din zone=\(pageCandidates.count), detectii=\(detections.count))")
+                var fullPageTurns = Set(detections.map(\.turns))
+                fullPageTurns.insert(0)
+                for turns in fullPageTurns {
+                    let rotImg = rotatedImage(turns)
+                    let fullRect = CGRect(x: 0, y: 0,
+                                          width: rotImg.width, height: rotImg.height)
+                    // fallback: cuvintele deja citite din zone, ca sa nu pierdem text
+                    // daca full-page OCR e mai slab pe o zona
+                    let fallback = cleanByTurns[turns] ?? []
+                    let fullClean = await pro.cropAndReOCR(
+                        rotatedImage: rotImg, cropRect: fullRect, fallbackBoxes: fallback)
+                    if fullClean.count >= 12 {
+                        appendSegmented(from: fullClean, turns: turns)
                     }
                 }
+                print("Candidati dupa full-page: \(pageCandidates.count)")
 
                 // Dedup: acelasi document fizic (re-OCR pe celula + full-page, sau
                 // orientari diferite). Documente alaturate au IoU mic si raman.

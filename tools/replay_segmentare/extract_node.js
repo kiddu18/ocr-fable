@@ -167,7 +167,8 @@ function extractCui(lines) {
     return d;
   }
   function isValid(cui) {
-    if (!/^\d{4,10}$/.test(cui)) return false;
+    // min 6: CUI-uri scurte trec accidental checksum-ul dupa trunchiere OCR
+    if (!/^\d{6,10}$/.test(cui)) return false;
     const key = [...'753217532'].reverse();
     const digits = [...cui].reverse().map(Number);
     const control = digits[0];
@@ -177,19 +178,47 @@ function extractCui(lines) {
     if (calc === 10) calc = 0;
     return calc === control;
   }
-  for (const c of raw) {
-    const d = normalize(c);
-    if (isValid(d)) return { cui: d, ok: true };
-  }
-  // candidati simpli: drop leading digit
+  const candidates = [];
   for (const c of raw) {
     let d = normalize(c);
-    if (d.length > 4) {
-      const drop = d.slice(1);
-      if (isValid(drop)) return { cui: drop, ok: true };
+    if (!d || d.length < 4) continue;
+    if (isValid(d)) candidates.push(d);
+    if (d.length > 4 && isValid(d.slice(1))) candidates.push(d.slice(1));
+    // CUI trunchiat: +1 sau +2 cifre
+    const before = candidates.length;
+    if (d.length >= 4 && d.length <= 8 && !isValid(d)) {
+      for (const x of '0123456789') {
+        const s1 = d + x;
+        if (isValid(s1)) candidates.push(s1);
+        for (const y of '0123456789') {
+          const s2 = s1 + y;
+          if (isValid(s2)) candidates.push(s2);
+        }
+      }
+    }
+    // flip o cifra doar daca append n-a produs nimic
+    if (candidates.length === before) {
+      const chars = [...d];
+      for (let i = 0; i < chars.length; i++) {
+        for (const x of '0123456789') {
+          if (chars[i] === x) continue;
+          const v = [...chars]; v[i] = x;
+          const s = v.join('');
+          if (isValid(s)) candidates.push(s);
+        }
+      }
     }
   }
-  return { cui: raw[0] ? normalize(raw[0]) : null, ok: false };
+  const uniq = [...new Set(candidates)].filter(c => c.length >= 6 && c.length <= 10);
+  if (uniq.length === 1) return { cui: uniq[0], ok: true, candidates: uniq };
+  if (uniq.length > 1) {
+    // Preferam extensia de lungime minima a prefixului citit (77454+70, nu flip-uri)
+    const base = raw[0] ? normalize(raw[0]) : '';
+    const extensions = uniq.filter(c => c.startsWith(base) && c.length > base.length)
+      .sort((a, b) => a.length - b.length || a.localeCompare(b));
+    return { cui: extensions[0] || uniq[0], ok: false, candidates: uniq };
+  }
+  return { cui: raw[0] ? normalize(raw[0]) : null, ok: false, candidates: [] };
 }
 
 function parseDate(lines) {
