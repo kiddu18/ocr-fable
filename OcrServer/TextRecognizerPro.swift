@@ -426,7 +426,11 @@ final class TextRecognizerPro {
         let ia = intersection.width * intersection.height
         let coverage = ia / min(aa, ab)
         let areaRatio = max(aa, ab) / min(aa, ab)
-        return iou(a, b) > 0.35 || (coverage > 0.72 && areaRatio < 1.90)
+        // Prag mai permisiv pe coverage: crop de zona (antet) vs full-page (intreg
+        // bonul) trebuie sa se considere acelasi document ca sa castige varianta
+        // cu sume, nu sa ramana ambele (Douglas dublu / MOL gol).
+        return iou(a, b) > 0.28 || (coverage > 0.55 && areaRatio < 3.5)
+            || (coverage > 0.40 && areaRatio < 2.8 && iou(a, b) > 0.12)
     }
 
     static func deduplicate(_ candidates: [ReceiptDetection]) -> [ReceiptDetection] {

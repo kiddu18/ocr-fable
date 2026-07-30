@@ -219,6 +219,41 @@ enum RoCUI {
             if !candidates.contains(exact) { candidates.insert(exact, at: 0) }
         }
 
+        // Fallback: pe fragmente fara linia "COD FISCAL" (crop incomplet),
+        // cautam CUI valid pe bon (nu CLIENT). Ex: "34626689" langa FISCAL/GPL.
+        if candidates.isEmpty || provisionalBest == nil {
+            let bareRx = try! NSRegularExpression(
+                pattern: "\\bR[O0]?\\s*([0-9OQDILSZB]{6,10})\\b|\\b([0-9]{6,10})\\b",
+                options: [.caseInsensitive])
+            let skip = try! NSRegularExpression(
+                pattern: "CLIENT|CNP|BENEF|CARD|TRX|POS|EJTRZ|AUTOR|TELEFON|IBAN|DATA|ORA",
+                options: [.caseInsensitive])
+            for line in lines {
+                let upper = line.uppercased()
+                let range = NSRange(upper.startIndex..., in: upper)
+                if skip.firstMatch(in: upper, range: range) != nil { continue }
+                // Preferam linii cu context fiscal
+                let fiscalCtx = upper.range(of: "FISC|CUI|CIF|COD|SRL|S\\.A|GAZ|PETROL|MAGISTRAL|MOL|DOUGLAS",
+                                            options: .regularExpression) != nil
+                for m in bareRx.matches(in: upper, range: range) {
+                    for g in 1...2 where m.range(at: g).location != NSNotFound {
+                        let d = normalizeDigits((upper as NSString).substring(with: m.range(at: g)))
+                        guard d.count >= 6, d.count <= 10, d != buyerCui else { continue }
+                        // Evita sume (18075) si date
+                        if d.hasPrefix("20") && d.count == 8 { continue }
+                        if isValid(d) || fiscalCtx {
+                            if !candidates.contains(d) { candidates.append(d) }
+                            if provisionalBest == nil, isValid(d) || fiscalCtx {
+                                provisionalBest = d
+                                provisionalRaw = d
+                                checksumOK = isValid(d)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // best e provizoriu (checksum); sursa de adevar = ANAF + nume dupa batch
         return (provisionalBest, provisionalRaw, checksumOK, candidates.isEmpty ? (provisionalBest.map { [$0] } ?? []) : candidates)
     }
@@ -602,6 +637,21 @@ enum ReceiptExtractor {
                 return true
             }
             return false
+        }
+        // Preferam denumiri cunoscute de brand pe termice zgomotoase
+        let brandRx = try! NSRegularExpression(
+            pattern: "\\b(MAGISTRAL(?:\\s+GAZ)?|MOL(?:\\s+ROMANIA)?|DOUGLAS|TURIST(?:\\s+SERVICE)?|ROG(?:\\s+GAZ)?|OMV|PETROM|LIDL|KAUFLAND|CARREFOUR|MEGA\\s*IMAGE)\\b",
+            options: [.caseInsensitive])
+        for line in lines.prefix(12) {
+            let cleaned = collapse(line.trimmingCharacters(in: .whitespaces))
+            let r = NSRange(cleaned.startIndex..., in: cleaned)
+            if let m = brandRx.firstMatch(in: cleaned, range: r) {
+                // Extinde la SRL/SA daca e pe linie
+                if legal.firstMatch(in: cleaned, range: r) != nil, !isGarbage(cleaned) {
+                    return cleaned
+                }
+                return (cleaned as NSString).substring(with: m.range)
+            }
         }
         for line in lines.prefix(10) {
             let cleaned = collapse(line.trimmingCharacters(in: .whitespaces))

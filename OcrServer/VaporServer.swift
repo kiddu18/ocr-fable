@@ -516,13 +516,43 @@ actor VaporServer {
 
                 // Dedup: acelasi document fizic (re-OCR pe celula + full-page, sau
                 // orientari diferite). Documente alaturate au IoU mic si raman.
+                // IMPORTANT: cand doua candidati se suprapun, pastram pe cel cu
+                // SUME (total), nu doar scorul de text — altfel antetul MOL/Douglas
+                // (CUI+nume, fara 188.16/613.10) invinge corpul complet.
+                func moneyRichness(_ det: ReceiptDetection) -> (Int, Double) {
+                    let text = det.words.map(\.text).joined(separator: " ")
+                    let moneyRx = try! NSRegularExpression(pattern: "\\b\\d{1,5}[.,]\\d{2}\\b")
+                    let range = NSRange(text.startIndex..., in: text)
+                    let money = moneyRx.numberOfMatches(in: text, range: range)
+                    let hasTotalAmt = text.range(
+                        of: "(?<!SUB)\\bTOTAL\\b(?!\\s*TVA).{0,48}\\d{1,5}[.,]\\d{2}",
+                        options: .regularExpression) != nil
+                    let hasCui = text.range(
+                        of: "COD\\s*FISC|C\\.?I\\.?F|\\bCUI\\b|\\bR[O0]\\s*\\d{4,}",
+                        options: [.regularExpression, .caseInsensitive]) != nil
+                    // (sume, scor compus) — mai multe sume + TOTAL cu valoare castiga
+                    let compound = Double(money) * 10
+                        + (hasTotalAmt ? 200 : 0)
+                        + (hasCui ? 40 : 0)
+                        + det.score * 0.05
+                    return (money, compound)
+                }
                 var finalDetections: [ReceiptDetection] = []
-                for candidate in pageCandidates.sorted(by: { $0.score > $1.score }) {
-                    let duplicate = finalDetections.contains { existing in
-                        TextRecognizerPro.samePhysicalDocument(
-                            existing.baseRect, candidate.baseRect)
+                for candidate in pageCandidates.sorted(by: {
+                    let am = moneyRichness($0), bm = moneyRichness($1)
+                    if am.1 != bm.1 { return am.1 > bm.1 }
+                    return $0.score > $1.score
+                }) {
+                    if let idx = finalDetections.firstIndex(where: {
+                        TextRecognizerPro.samePhysicalDocument($0.baseRect, candidate.baseRect)
+                    }) {
+                        let existing = finalDetections[idx]
+                        if moneyRichness(candidate).1 > moneyRichness(existing).1 {
+                            finalDetections[idx] = candidate
+                        }
+                    } else {
+                        finalDetections.append(candidate)
                     }
-                    if !duplicate { finalDetections.append(candidate) }
                 }
                 finalDetections.sort { a, b in
                     if abs(a.baseRect.minY - b.baseRect.minY) > 20 {
@@ -597,17 +627,65 @@ actor VaporServer {
                 }
                 
                 // --- 3b. Dedup logic dupa extractie (acelasi bon aparut de 2 ori
-                //         din zone + full-page, ex. FAN dublat)
+                //         din zone + full-page, ex. FAN dublat / Douglas gol + plin)
                 func nearEq(_ a: Double?, _ b: Double?) -> Bool {
                     guard let a, let b else { return a == nil && b == nil }
                     return abs(a - b) < 0.05
                 }
-                var seenReceiptKeys = Set<String>()
-                receiptsList = receiptsList.filter { r in
-                    let key = "\((r.cui ?? r.cuiOCR ?? "").filter { $0.isNumber })}|\(r.date ?? "")|\(r.bonNumber ?? "")|\(String(format: "%.2f", r.total ?? -1))"
-                    if key.hasPrefix("||") && r.total == nil { return true } // pastreaza incomplete distincte
-                    return seenReceiptKeys.insert(key).inserted
+                func receiptCompleteness(_ r: ReceiptResult) -> Double {
+                    var s = 0.0
+                    if r.total != nil { s += 100 }
+                    if r.vatLines.contains(where: { $0.amount != nil }) { s += 40 }
+                    if r.cui != nil || r.cuiOCR != nil { s += 30 }
+                    if r.date != nil { s += 15 }
+                    if let m = r.merchantNameOCR, m.count >= 6 { s += 10 }
+                    if r.mathVerified { s += 20 }
+                    if r.cuiChecksumValid { s += 10 }
+                    // Penalizeaza fragmente (doar antet sau doar sume)
+                    if r.total == nil { s -= 50 }
+                    return s
                 }
+                func cuiKey(_ r: ReceiptResult) -> String {
+                    String((r.cui ?? r.cuiOCR ?? "").filter { $0.isNumber })
+                }
+                // 1) Dubluri ale ACELUIASI document fizic (acelasi CUI + total apropiat
+                //    SAU acelasi CUI + total lipsa pe unul din ele + bbox suprapus).
+                //    DOUA bonuri Magistral cu CUI identic dar totaluri/date diferite
+                //    raman ambele (aceeasi firma, tranzactii distincte).
+                var kept: [ReceiptResult] = []
+                for r in receiptsList.sorted(by: { receiptCompleteness($0) > receiptCompleteness($1) }) {
+                    let rk = cuiKey(r)
+                    let ra = CGRect(x: r.bboxX, y: r.bboxY,
+                                    width: max(r.bboxW, 1), height: max(r.bboxH, 1))
+                    let isDup = kept.contains { o in
+                        let ok = cuiKey(o)
+                        let ob = CGRect(x: o.bboxX, y: o.bboxY,
+                                        width: max(o.bboxW, 1), height: max(o.bboxH, 1))
+                        let samePlace = TextRecognizerPro.samePhysicalDocument(ra, ob)
+                        // Acelasi CUI + acelasi total (dublura OCR)
+                        if rk.count >= 4, rk == ok, nearEq(r.total, o.total) { return true }
+                        // Acelasi CUI, unul fara total, suprapunere spatiala
+                        if rk.count >= 4, rk == ok, samePlace,
+                           (r.total == nil || o.total == nil) { return true }
+                        // Fara CUI pe fragment, suprapus pe un bon deja bun
+                        if rk.count < 4, samePlace { return true }
+                        // Fara CUI, acelasi total+data ca un bon pastrat
+                        if rk.count < 4, let t = r.total, let d = r.date,
+                           nearEq(o.total, t), o.date == d { return true }
+                        return false
+                    }
+                    if isDup { continue }
+                    // Fragmente goale (fara total, fara CUI)
+                    if r.total == nil && rk.count < 4 { continue }
+                    kept.append(r)
+                }
+                receiptsList = kept.sorted { a, b in
+                    if abs(a.bboxY - b.bboxY) > 20 { return a.bboxY < b.bboxY }
+                    return a.bboxX < b.bboxX
+                }
+                // Reindex
+                for i in receiptsList.indices { receiptsList[i].index = i }
+
                 var seenChitKeys = Set<String>()
                 chitanteList = chitanteList.filter { ch in
                     let key = "\((ch.emitentCui ?? "").filter { $0.isNumber })}|\(ch.serie ?? "")|\(ch.numar ?? "")|\(ch.date ?? "")|\(String(format: "%.2f", ch.suma ?? -1))"
